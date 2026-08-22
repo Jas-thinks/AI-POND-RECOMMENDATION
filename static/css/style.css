@@ -1,0 +1,759 @@
+/* ==========================================================================
+   AI-Based Village Pond Planner - Main CSS Stylesheet
+   Design Philosophy: Clean, modern, hydrology-themed (blues, greens, soft grays)
+   ========================================================================== */
+
+:root {
+    --primary: #1e3a8a;       /* Deep navy blue */
+    --primary-hover: #1e40af; /* Hover navy blue */
+    --accent: #0d9488;        /* Hydrology teal */
+    --accent-light: #ccfbf1;  /* Soft teal highlight */
+    --background: #f8fafc;    /* Clean light slate */
+    --sidebar-bg: #ffffff;    /* Sidebar white */
+    --card-bg: #ffffff;       /* Cards white */
+    --text-main: #0f172a;     /* Dark slate */
+    --text-muted: #64748b;    /* Light slate */
+    --border: #e2e8f0;        /* Light gray borders */
+    --gold: #eab308;          /* Gold accent */
+    --green: #10b981;         /* Success green */
+    --blue: #3b82f6;          /* Water blue */
+    --red: #ef4444;           /* Danger red */
+    --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+    --shadow-md: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.08);
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background-color: var(--background);
+    color: var(--text-main);
+    line-height: 1.5;
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* APP LAYOUT */
+.app-container {
+    display: flex;
+    height: 100vh;
+    width: 100vw;
+}
+
+/* SIDEBAR STYLES */
+.sidebar {
+    width: 380px;
+    min-width: 380px;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    z-index: 10;
+    box-shadow: 2px 0 10px rgba(0, 0, 0, 0.02);
+}
+
+.sidebar-header {
+    padding: 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.logo-icon {
+    font-size: 28px;
+    color: var(--accent);
+}
+
+.sidebar-header h1 {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--primary);
+    line-height: 1.1;
+}
+
+.sidebar-header .subtitle {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.sidebar-content {
+    padding: 20px;
+    overflow-y: auto;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+/* CONTROL GROUPS */
+.control-group {
+    background: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+}
+
+.control-group h3 {
+    font-size: 13.5px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+}
+
+.control-group label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-top: 10px;
+    margin-bottom: 4px;
+}
+
+.search-box {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.search-box input {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px;
+    outline: none;
+    transition: border 0.2s;
+}
+
+.search-box input:focus {
+    border-color: var(--accent);
+}
+
+.search-box button {
+    padding: 8px 14px;
+    background-color: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: background-color 0.2s;
+}
+
+.search-box button:hover {
+    background-color: #0f766e;
+}
+
+.coord-inputs {
+    display: flex;
+    gap: 8px;
+}
+
+.coord-inputs div {
+    flex: 1;
+}
+
+.coord-inputs input, select {
+    width: 100%;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12.5px;
+    outline: none;
+    background-color: white;
+}
+
+.two-col {
+    display: flex;
+    gap: 8px;
+}
+
+.two-col div {
+    flex: 1;
+}
+
+/* SLIDERS */
+.slider-group {
+    margin-top: 12px;
+}
+
+.slider-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+.slider-header label {
+    margin: 0;
+}
+
+.slider-header span {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--primary);
+}
+
+.slider-group input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.weight-status-info {
+    margin-top: 12px;
+    text-align: center;
+    font-size: 11.5px;
+    color: var(--text-muted);
+}
+
+/* TOGGLE COMPONENT */
+.toggle-container {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    position: relative;
+    user-select: none;
+}
+
+.toggle-container input {
+    position: absolute;
+    opacity: 0;
+    cursor: pointer;
+    height: 0;
+    width: 0;
+}
+
+.checkmark {
+    position: relative;
+    height: 20px;
+    width: 36px;
+    background-color: #cbd5e1;
+    border-radius: 20px;
+    transition: background-color 0.2s;
+    margin-right: 12px;
+}
+
+.checkmark:after {
+    content: "";
+    position: absolute;
+    left: 3px;
+    top: 3px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background-color: white;
+    transition: transform 0.2s;
+}
+
+.toggle-container input:checked ~ .checkmark {
+    background-color: var(--accent);
+}
+
+.toggle-container input:checked ~ .checkmark:after {
+    transform: translateX(16px);
+}
+
+.toggle-text {
+    display: flex;
+    flex-direction: column;
+}
+
+.toggle-text strong {
+    font-size: 12px;
+    color: var(--primary);
+}
+
+.toggle-text span {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+.demo-mode-box {
+    background-color: #f0fdfa;
+    border-color: #99f6e4;
+}
+
+/* PRIMARY BUTTON */
+.primary-btn {
+    width: 100%;
+    padding: 12px;
+    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-hover) 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    box-shadow: 0 4px 12px rgba(30, 58, 138, 0.15);
+    transition: transform 0.1s, box-shadow 0.2s;
+}
+
+.primary-btn:hover {
+    box-shadow: 0 6px 16px rgba(30, 58, 138, 0.25);
+}
+
+.primary-btn:active {
+    transform: scale(0.98);
+}
+
+/* MAIN DASHBOARD CONTENT AREA */
+.dashboard-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow-y: auto;
+}
+
+/* TOP BAR */
+.topbar {
+    height: 60px;
+    min-height: 60px;
+    background-color: #ffffff;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 24px;
+}
+
+.status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.badge {
+    padding: 4px 8px;
+    font-size: 10.5px;
+    font-weight: 600;
+    border-radius: 4px;
+    text-transform: uppercase;
+}
+
+.badge-demo {
+    background-color: #fee2e2;
+    color: var(--red);
+    border: 1px solid #fecaca;
+}
+
+.badge-real {
+    background-color: #d1fae5;
+    color: var(--green);
+    border: 1px solid #a7f3d0;
+}
+
+.status-msg {
+    font-size: 13px;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.course-code {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    background-color: #f1f5f9;
+    padding: 4px 10px;
+    border-radius: 12px;
+}
+
+/* MAP SECTION */
+.map-section {
+    position: relative;
+    height: 420px;
+    min-height: 420px;
+    width: 100%;
+    border-bottom: 1px solid var(--border);
+}
+
+#map {
+    height: 100%;
+    width: 100%;
+}
+
+.map-legend {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    z-index: 1000;
+    background-color: white;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-md);
+    width: 180px;
+}
+
+.map-legend h4 {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-main);
+    margin-bottom: 6px;
+    text-align: center;
+}
+
+.legend-scale {
+    display: flex;
+    height: 8px;
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 4px;
+}
+
+.legend-scale span {
+    flex: 1;
+}
+
+.legend-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+/* CARDS & GRID LAYOUTS */
+.analytics-grid {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    gap: 20px;
+    padding: 24px;
+}
+
+.bottom-panel-grid {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 20px;
+    padding: 0 24px 24px 24px;
+}
+
+.card {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.card-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    background-color: #fafbfc;
+}
+
+.card-header h2 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.text-gold {
+    color: var(--gold);
+}
+
+.card-subtitle {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.card-body {
+    padding: 20px;
+    flex: 1;
+}
+
+/* METRICS GRID */
+.metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.metric {
+    background-color: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+}
+
+.m-label {
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.m-value {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-main);
+    margin-top: 2px;
+}
+
+.color-green {
+    color: var(--green) !important;
+}
+
+.color-blue {
+    color: var(--blue) !important;
+}
+
+/* DIMENSIONS RECOMMENDATION BOX */
+.dimensions-box {
+    background-color: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 8px;
+    padding: 14px 16px;
+}
+
+.dimensions-box h4 {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--primary);
+    margin-bottom: 10px;
+    text-align: center;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.dim-row {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 16px;
+}
+
+.dim-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.dim-num {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--primary);
+}
+
+.dim-unit {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.dim-cross {
+    font-size: 20px;
+    color: #93c5fd;
+    font-weight: 300;
+}
+
+.dim-result {
+    margin-top: 10px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--primary-hover);
+    border-top: 1px dashed #bfdbfe;
+    padding-top: 8px;
+}
+
+/* CUSTOM CSS RAINFALL CHART */
+.chart-body {
+    display: flex;
+    flex-direction: column;
+}
+
+.rainfall-bar-chart {
+    height: 180px;
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+    position: relative;
+}
+
+.no-chart-data {
+    margin: auto;
+    font-size: 13px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.chart-bar-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+    justify-content: flex-end;
+}
+
+.chart-bar-fill {
+    width: 100%;
+    background: linear-gradient(to top, #2563eb, #60a5fa);
+    border-radius: 4px 4px 0 0;
+    min-height: 2px;
+    transition: height 0.5s ease-out;
+    position: relative;
+}
+
+.chart-bar-fill:hover::after {
+    content: attr(data-val) "mm";
+    position: absolute;
+    top: -24px;
+    left: 50%;
+    transform: translateX(-50%);
+    background-color: var(--text-main);
+    color: white;
+    padding: 2px 6px;
+    font-size: 9px;
+    font-weight: 600;
+    border-radius: 4px;
+    z-index: 10;
+    white-space: nowrap;
+}
+
+.chart-bar-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-top: 6px;
+}
+
+.runoff-equation-box {
+    margin-top: 12px;
+    background-color: #f8fafc;
+    border: 1px solid var(--border);
+    padding: 10px;
+    border-radius: 6px;
+}
+
+.eq-title {
+    display: block;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--primary);
+}
+
+.eq-code {
+    display: block;
+    font-family: monospace;
+    font-size: 11px;
+    color: var(--text-main);
+    margin-top: 4px;
+    overflow-x: auto;
+}
+
+/* CANDIDATES TABLE */
+.candidates-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+    text-align: left;
+}
+
+.candidates-table th {
+    background-color: #f8fafc;
+    color: var(--text-muted);
+    font-weight: 600;
+    padding: 12px;
+    border-bottom: 2px solid var(--border);
+    text-transform: uppercase;
+    font-size: 10.5px;
+    letter-spacing: 0.3px;
+}
+
+.candidates-table td {
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+}
+
+.candidates-table tbody tr:hover {
+    background-color: #fafbfc;
+}
+
+.text-center {
+    text-align: center;
+}
+
+.text-muted {
+    color: var(--text-muted);
+}
+
+/* GIS ACCORDION EXPLAINERS */
+.accordion-item {
+    border-bottom: 1px solid var(--border);
+    padding: 10px 0;
+}
+
+.accordion-item:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.accordion-item strong {
+    display: block;
+    font-size: 12.5px;
+    color: var(--text-main);
+    font-weight: 600;
+}
+
+.accordion-item p {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    margin-top: 3px;
+}
+
+/* CUSTOM MAP CELL POPUP STYLING */
+.gis-cell-popup {
+    font-size: 12px;
+    min-width: 140px;
+}
+
+.gis-cell-popup h4 {
+    margin-bottom: 6px;
+    border-bottom: 1px solid #ddd;
+    padding-bottom: 2px;
+    color: var(--primary);
+}
+
+/* Leaflet Overrides */
+.leaflet-tile {
+    /* Slight contrast adjust */
+    filter: brightness(0.97) contrast(1.02);
+}
+
+.leaflet-popup-content-value {
+    font-weight: bold;
+}

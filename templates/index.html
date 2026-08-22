@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI-Based Village Pond Planner</title>
+    
+    <!-- Google Fonts: Inter & Space Grotesk -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+    
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    
+    <!-- Custom Style -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="app-container">
+        
+        <!-- SIDEBAR CONTROLS -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <i class="fa-solid fa-water-ladder logo-icon"></i>
+                <div>
+                    <h1>PondPlanner</h1>
+                    <span class="subtitle">AI Village Water Resource Planner</span>
+                </div>
+            </div>
+            
+            <div class="sidebar-content">
+                <!-- Location Search -->
+                <div class="control-group">
+                    <h3><i class="fa-solid fa-map-location-dot"></i> 1. Location Selection</h3>
+                    <div class="search-box">
+                        <input type="text" id="village-search" placeholder="Enter village or coordinates..." value="Malpura, Rajasthan">
+                        <button id="search-btn"><i class="fa-solid fa-magnifying-glass"></i></button>
+                    </div>
+                    <div class="coord-inputs">
+                        <div>
+                            <label for="input-lat">Latitude</label>
+                            <input type="number" id="input-lat" step="0.000001" value="26.2974">
+                        </div>
+                        <div>
+                            <label for="input-lon">Longitude</label>
+                            <input type="number" id="input-lon" step="0.000001" value="75.3804">
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- GIS Constraints & Sizing parameters -->
+                <div class="control-group">
+                    <h3><i class="fa-solid fa-sliders"></i> 2. Hydrology Parameters</h3>
+                    
+                    <label for="param-soil">Soil / Land Type (Runoff Coeff)</label>
+                    <select id="param-soil">
+                        <option value="sandy_soil">Sandy Soil (C = 0.15)</option>
+                        <option value="loam_soil" selected>Loam Soil (C = 0.35)</option>
+                        <option value="clay_soil">Clay / Heavy Soil (C = 0.55)</option>
+                        <option value="forested">Forested / Vegetation (C = 0.12)</option>
+                        <option value="urban_impervious">Impervious Clay / Concrete (C = 0.80)</option>
+                    </select>
+                    
+                    <div class="two-col">
+                        <div>
+                            <label for="param-spacing">Cell Size (m)</label>
+                            <select id="param-spacing">
+                                <option value="30">30 m (High)</option>
+                                <option value="50" selected>50 m (Med)</option>
+                                <option value="80">80 m (Low)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="param-grid-size">DEM Grid</label>
+                            <select id="param-grid-size">
+                                <option value="9">9 x 9 (81 px)</option>
+                                <option value="11" selected>11 x 11 (121 px)</option>
+                                <option value="13">13 x 13 (169 px)</option>
+                                <option value="15">15 x 15 (225 px)</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="slider-group">
+                        <div class="slider-header">
+                            <label for="param-depth">Target Pond Avg Depth</label>
+                            <span id="val-depth">2.5 m</span>
+                        </div>
+                        <input type="range" id="param-depth" min="1.5" max="4.0" step="0.1" value="2.5">
+                    </div>
+                    
+                    <div class="slider-group">
+                        <div class="slider-header">
+                            <label for="param-fraction">Capture Volume Fraction</label>
+                            <span id="val-fraction">15%</span>
+                        </div>
+                        <input type="range" id="param-fraction" min="5" max="40" step="1" value="15">
+                    </div>
+                </div>
+
+                <!-- AI Decision Criteria Weights -->
+                <div class="control-group">
+                    <h3><i class="fa-solid fa-scale-balanced"></i> 3. Suitability Weights</h3>
+                    <div class="slider-group">
+                        <div class="slider-header">
+                            <label for="weight-elev">Elevation (Flat/Low-Lying)</label>
+                            <span id="val-w-elev">25%</span>
+                        </div>
+                        <input type="range" id="weight-elev" min="0" max="100" value="25" class="weight-slider">
+                    </div>
+                    <div class="slider-group">
+                        <div class="slider-header">
+                            <label for="weight-slope">Slope Stability (Flatness)</label>
+                            <span id="val-w-slope">35%</span>
+                        </div>
+                        <input type="range" id="weight-slope" min="0" max="100" value="35" class="weight-slider">
+                    </div>
+                    <div class="slider-group">
+                        <div class="slider-header">
+                            <label for="weight-accum">Water Accumulation (Flow)</label>
+                            <span id="val-w-accum">40%</span>
+                        </div>
+                        <input type="range" id="weight-accum" min="0" max="100" value="40" class="weight-slider">
+                    </div>
+                    <div class="weight-status-info">
+                        Weights sum: <strong id="weight-sum">100%</strong>
+                    </div>
+                </div>
+
+                <!-- Simulation Mode Toggle -->
+                <div class="control-group demo-mode-box">
+                    <label class="toggle-container">
+                        <input type="checkbox" id="param-demo" checked>
+                        <span class="checkmark"></span>
+                        <div class="toggle-text">
+                            <strong>DEMO MODE (VALLEY BASEIN)</strong>
+                            <span>Uses synthetic local slope; offline friendly</span>
+                        </div>
+                    </label>
+                </div>
+                
+                <!-- Action Button -->
+                <button id="run-btn" class="primary-btn">
+                    <i class="fa-solid fa-gears"></i> Run AI Pond Analysis
+                </button>
+            </div>
+        </aside>
+
+        <!-- MAIN DASHBOARD -->
+        <main class="dashboard-main">
+            <!-- TOP BAR -->
+            <header class="topbar">
+                <div class="status-indicator">
+                    <span id="mode-badge" class="badge badge-demo">Demo Mode Active</span>
+                    <span id="api-status" class="status-msg">Click 'Run AI Pond Analysis' to start.</span>
+                </div>
+                <div class="meta-links">
+                    <span class="course-code">CS559 Project</span>
+                </div>
+            </header>
+
+            <!-- INTERACTIVE MAP & MAP CONTROLS -->
+            <section class="map-section">
+                <div id="map"></div>
+                <!-- Mini legends/tools overlaid on map via Leaflet or CSS -->
+                <div class="map-legend" id="layer-legend">
+                    <h4>Suitability Score</h4>
+                    <div class="legend-scale">
+                        <span style="background:#d73027"></span>
+                        <span style="background:#fc8d59"></span>
+                        <span style="background:#fee08b"></span>
+                        <span style="background:#d9ef8b"></span>
+                        <span style="background:#91cf60"></span>
+                        <span style="background:#1a9850"></span>
+                    </div>
+                    <div class="legend-labels">
+                        <span>Low (0)</span>
+                        <span>High (100)</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SUMMARY DETAILS & ANALYTICS -->
+            <section class="analytics-grid">
+                
+                <!-- BEST RECOMMENDATION CARD -->
+                <div class="card recommendation-card">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-star text-gold"></i> Recommended Pond Site</h2>
+                        <span class="card-subtitle">Highest Weighted suitability</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="metrics-grid">
+                            <div class="metric">
+                                <span class="m-label">Suitability Score</span>
+                                <span class="m-value color-green" id="rec-score">--</span>
+                            </div>
+                            <div class="metric">
+                                <span class="m-label">Elevation (DEM)</span>
+                                <span class="m-value" id="rec-elev">--</span>
+                            </div>
+                            <div class="metric">
+                                <span class="m-label">Local Slope</span>
+                                <span class="m-value" id="rec-slope">--</span>
+                            </div>
+                            <div class="metric">
+                                <span class="m-label">Catchment Area</span>
+                                <span class="m-value" id="rec-catchment">--</span>
+                            </div>
+                            <div class="metric">
+                                <span class="m-label">Rainfall (Annual)</span>
+                                <span class="m-value" id="rec-rainfall">--</span>
+                            </div>
+                            <div class="metric">
+                                <span class="m-label">Runoff Volume</span>
+                                <span class="m-value color-blue" id="rec-runoff">--</span>
+                            </div>
+                        </div>
+                        
+                        <div class="dimensions-box">
+                            <h4>Recommended Pond Construction Dimensions</h4>
+                            <div class="dim-row">
+                                <div class="dim-col">
+                                    <span class="dim-num" id="dim-len">--</span>
+                                    <span class="dim-unit">Length (m)</span>
+                                </div>
+                                <div class="dim-cross">&times;</div>
+                                <div class="dim-col">
+                                    <span class="dim-num" id="dim-wid">--</span>
+                                    <span class="dim-unit">Width (m)</span>
+                                </div>
+                                <div class="dim-cross">&times;</div>
+                                <div class="dim-col">
+                                    <span class="dim-num" id="dim-dep">--</span>
+                                    <span class="dim-unit">Avg Depth (m)</span>
+                                </div>
+                            </div>
+                            <div class="dim-result">
+                                Estimated Storage Capacity: <strong id="dim-capacity">--</strong> m³ (Capped target)
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- RAINFALL CHART & RUNOFF ESTIMATES -->
+                <div class="card chart-card">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-cloud-showers-heavy"></i> Monthly Rainfall Climatology</h2>
+                        <span class="card-subtitle" id="rainfall-source">Source: --</span>
+                    </div>
+                    <div class="card-body chart-body">
+                        <!-- Custom CSS Bar Graph for Zero Dependencies / Clean Render -->
+                        <div class="rainfall-bar-chart" id="rainfall-chart-container">
+                            <!-- Populated dynamically via JS -->
+                            <div class="no-chart-data">No analysis run yet</div>
+                        </div>
+                        <div class="runoff-equation-box">
+                            <span class="eq-title"><i class="fa-solid fa-calculator"></i> Runoff Equation (Rational Method):</span>
+                            <code class="eq-code">Runoff Volume (m³) = Rainfall (m) &times; Catchment (m²) &times; Runoff Coeff (C)</code>
+                        </div>
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- EXTRA TABS / INFORMATION PANELS -->
+            <section class="bottom-panel-grid">
+                
+                <!-- COMPARISON TABLE CARD -->
+                <div class="card table-card">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-list-ol"></i> AI Candidates Ranking Comparison</h2>
+                        <span class="card-subtitle">Distinct local basins identified</span>
+                    </div>
+                    <div class="card-body">
+                        <table class="candidates-table" id="candidates-table">
+                            <thead>
+                                <tr>
+                                    <th>Rank</th>
+                                    <th>Coordinates</th>
+                                    <th>Elevation</th>
+                                    <th>Slope</th>
+                                    <th>Catchment Area</th>
+                                    <th>Runoff (Est)</th>
+                                    <th>Pond Size (L&times;W&times;D)</th>
+                                    <th>Suitability Score</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td colspan="8" class="text-center text-muted">Run analysis to identify candidate pond sites.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- ALGORITHM EXPLAINER CARD -->
+                <div class="card explainer-card">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-book"></i> GIS Methodology Reference</h2>
+                        <span class="card-subtitle">CS559 Theoretical Foundation</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="accordion-item">
+                            <strong>1. Digital Elevation Model (DEM) Grid</strong>
+                            <p>A matrix of cells containing terrain height values. It describes topography. We fetch this dynamically via Open-Meteo API or generate a synthetic bowl basin for offline tests.</p>
+                        </div>
+                        <div class="accordion-item">
+                            <strong>2. Slope (Horn's Central Difference)</strong>
+                            <p>Measures steepness. Flat slope limits erosion and facilitates stable embankment construction. Computed as the rate of change of elevation in orthogonal directions.</p>
+                        </div>
+                        <div class="accordion-item">
+                            <strong>3. D8 Flow Routing Algorithm</strong>
+                            <p>Water flows from each cell to the steepest downslope neighboring cell among the 8 surrounding cells. Sinks are cells with no lower neighbors where natural ponding occurs.</p>
+                        </div>
+                        <div class="accordion-item">
+                            <strong>4. Flow Accumulation & Catchment Delineation</strong>
+                            <p>Flow Accumulation is the count of cells draining through a cell. Delineation traces the upstream network in reverse using Breadth-First Search (BFS) to map the total runoff collection basin.</p>
+                        </div>
+                    </div>
+                </div>
+
+            </section>
+
+        </main>
+        
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <!-- Custom Application JS -->
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
