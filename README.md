@@ -1,218 +1,192 @@
-# AI-Based Village Pond Planning System
+# AI Pond Intelligence Platform
+**Geospatial Decision Support System for Village Pond Planning**
 
-An interactive geographical decision support tool developed for **CS559 — Computer Systems Design** to assist planners, hydrologists, and students in identifying, evaluating, and sizing suitable locations for constructing village rainwater harvesting ponds.
+The AI Pond Intelligence Platform is a geospatial decision support platform designed for preliminary planning and ranking of village pond locations. It integrates terrain processing, hydrological modeling, rainfall estimation, runoff calculation, land-use filtering, and multi-factor suitability scoring into an interactive dark command-center web application.
+
+---
+
+## Table of Contents
+1. [Project Overview](#1-project-overview)
+2. [Problem Statement](#2-problem-statement)
+3. [Features](#3-features)
+4. [Architecture](#4-architecture)
+5. [Technology Stack](#5-technology-stack)
+6. [Analysis Workflow](#6-analysis-workflow)
+7. [Input Methods](#7-input-methods)
+8. [Location Analysis](#8-location-analysis)
+9. [Contour / KML Analysis](#9-contour--kml-analysis)
+10. [DEM Generation](#10-dem-generation)
+11. [Hydrology Analysis](#11-hydrology-analysis)
+12. [Candidate Ranking](#12-candidate-ranking)
+13. [Output Files](#13-output-files)
+14. [Installation](#14-installation)
+15. [Running Backend](#15-running-backend)
+16. [Running Frontend](#16-running-frontend)
+17. [Project Structure](#17-project-structure)
+18. [Limitations](#18-limitations)
+19. [Future Work](#19-future-work)
 
 ---
 
 ## 1. Project Overview
-Rainwater harvesting ponds are essential in semi-arid and agricultural regions to capture monsoon runoff, recharge groundwater aquifers, and provide backup irrigation. This project implements a lightweight spatial planning pipeline to geocode locations, analyze local digital elevation model (DEM) terrain, route water using the D8 flow direction model, outline catchment drainage basins, calculate runoff potentials using historic weather precipitation statistics, and recommend optimal pond construction coordinates based on a Multi-Criteria Decision Analysis (MCDA) framework.
+The platform addresses rural water scarcity by automating candidate pond site selection using geospatial calculations. It processes topographic and hydrological parameters to calculate surface runoff, delineate catchment areas, estimate storage capacities, and output ranked candidate sites on a Leaflet map workspace.
 
----
-
-## 2. System Architecture
-The application runs locally with a clean, low-complexity, three-tier architecture:
-
-```
-[Leaflet Frontend] <--- JSON REST ---> [Flask Backend Router]
-       |                                      |
-       v                                      v
- [Map Layers / Charts]                [GIS Algorithms & APIs]
-                                     - location.py (OSM Nominatim)
-                                     - terrain.py (Open-Meteo DEM)
-                                     - slope.py (Horn's Method)
-                                     - catchment.py (D8 Accumulation)
-                                     - rainfall.py (Open-Meteo Archive)
-                                     - runoff.py (Rational Equation)
-                                     - suitability.py (Weighted MCDA)
-```
-
-- **Frontend:** Single-page dashboard built using HTML5, Vanilla CSS, Leaflet.js (for map overlays), and a responsive CSS bar chart for meteorological averages.
-- **Backend:** Flask web server executing mathematical algorithms in pure Python/NumPy/SciPy.
-- **Data/APIs:** OpenStreetMap Nominatim for geocoding, Open-Meteo APIs for elevations and rainfall climatology.
-
----
+## 2. Problem Statement
+Manual identification of optimal pond locations in rural regions requires evaluating complex topographical features, slope gradients, drainage networks, land encumbrances, and rainfall volume. Without automated decision support systems, site selection can lead to ineffective water storage or high construction costs. This platform standardizes terrain and hydrological analysis to support decision-making.
 
 ## 3. Features
-1. **Interactive Geocoder:** Resolves villages and landmark names to latitude/longitude.
-2. **Dynamic DEM Extraction:** Generates an elevation grid (up to 15x15) around target coordinates via Open-Meteo or loads a pre-loaded synthetic profile.
-3. **Slope Gradient Analysis:** Computes steepness to ensure structural embankment safety.
-4. **D8 Drainage Flow Routing:** Maps flow vector paths to neighbor cells of steepest descent.
-5. **Upstream Catchment Boundaries:** Traces flow directions backward using BFS to delineate total drainage area.
-6. **Rainfall & Runoff Modeling:** Connects to archive weather data to sum precipitation and calculate runoff volume.
-7. **Pond Dimension Sizing:** Sizes rectangular excavation dimensions ($L \times W \times D$) based on soil coefficients and target volume limits.
-8. **MCDA Scoring Engine:** Evaluates candidate grid cells using adjustable weights for elevation, slope, and flow accumulation.
-9. **Interactive Map Overlays:** Allows toggling between Suitability, Elevation, Slope, and Flow accumulation rasters instantly on Leaflet.
-10. **Demo Mode:** Built-in synthetic valley basin configuration to demonstrate functionality immediately without internet or external requests.
+- **Dual Input Modes**: Direct location lookup via geocoding or manual upload of KML/KMZ contour files.
+- **Automated DEM Handling**: OpenTopography DEM fetch for location mode; elevation interpolation (Barycentric / IDW) for uploaded contours.
+- **Hydrological Engine**: Sink filling via priority-flood algorithm, D8 flow direction, flow accumulation via Kahn topological sorting, and reverse-BFS catchment delineation.
+- **Land Clearance & Exclusions**: OpenStreetMap integration to filter out existing water bodies, rivers, buildings, and transportation networks.
+- **Multi-Factor Ranking**: Combined evaluation of terrain slope, flow accumulation, storage potential, and environmental constraints.
+- **Interactive Command-Center UI**: Leaflet map workspace with candidate strip, layer toggle controls, candidate inspector panel, and detailed modal metrics.
+- **Data Export**: Generated DEM GeoTIFF, contour KML, and GeoJSON layer downloads.
 
----
-
-## 4. Technology Stack
-- **Web Server:** Python 3 + Flask
-- **Math & Science:** NumPy, SciPy, Pandas
-- **APIs:** Requests, Python-dotenv
-- **Frontend Map:** Leaflet.js
-- **Icons & Fonts:** FontAwesome 6, Google Fonts (Inter, Space Grotesk)
-
----
-
-## 5. Mathematical Formulas & GIS Algorithms
-
-### A. Slope Calculation (Central Differences)
-To find the slope at cell $(i, j)$ with spacing $S$ (meters):
-- **Change in X (West-East):**  
-  $$\frac{dz}{dx} = \frac{elevation_{i, j+1} - elevation_{i, j-1}}{2 \cdot S}$$
-- **Change in Y (North-South):**  
-  $$\frac{dz}{dy} = \frac{elevation_{i+1, j} - elevation_{i-1, j}}{2 \cdot S}$$
-- **Slope Magnitude (degrees):**  
-  $$Slope(^{\circ}) = \arctan\left(\sqrt{\left(\frac{dz}{dx}\right)^2 + \left(\frac{dz}{dy}\right)^2}\right) \times \frac{180}{\pi}$$
-*(Boundary cells utilize first-order one-sided differences).*
-
-### B. D8 Flow Routing
-For each cell, slope gradient is evaluated for all 8 surrounding neighbors:
-- **Slope to neighbor $k$:**  
-  $$Slope_k = \frac{elevation_{cell} - elevation_{neighbor\_k}}{S \cdot f_k}$$
-  where $f_k = 1.0$ for orthogonal neighbors (N, S, E, W) and $f_k = \sqrt{2}$ for diagonal neighbors (NE, NW, SE, SW).
-- The cell drains to the neighbor cell with the maximum positive slope. Sinks (depressions/pits) are cells with no lower neighbors (direction code: `-1`).
-
-### C. Flow Accumulation & Catchment BFS Tracing
-- **Flow Accumulation:** Cells are sorted descending by elevation. Each cell passes its accumulated count (starting at 1.0) to its designated D8 downstream neighbor. Sinks accumulate flow but do not pass it on.
-- **Catchment Delineation:** Starting from a target candidate cell, we run a Breadth-First Search (BFS) on the reverse flow network. Any neighboring cell whose flow vector points to the current cell is added to the catchment set.
-  $$\text{Catchment Area } (m^2) = \text{Count of catchment cells} \times S^2$$
-
-### D. Simplified Runoff Volume (Rational Equation)
-Estimated annual runoff volume ($Q$) draining to the pond site:
-$$Q (m^3) = P (m) \times A (m^2) \times C$$
-- $P$ is annual precipitation in meters ($P = \text{Rainfall in mm} / 1000$)
-- $A$ is the catchment area in square meters.
-- $C$ is the dimensionless Runoff Coefficient based on soil infiltration rate:
-  - Sandy Soil ($C = 0.15$)
-  - Loam Soil ($C = 0.35$)
-  - Clay Soil ($C = 0.55$)
-  - Forested ($C = 0.12$)
-  - Urban/Impervious ($C = 0.80$)
-
-### E. Pond Capacity & Excavation Dimensions
-The pond is sized to store a fraction of the annual runoff volume ($V_{target} = 0.15 \times Q$), capped between $200\text{ m}^3$ (minimum practical size) and $5000\text{ m}^3$ (village limit).
-- Assuming standard depth ($D = 2.5\text{ m}$) and a length-to-width ratio of $1.5 : 1$:
-  $$\text{Pond Area } (m^2) = \frac{V_{target}}{D}$$
-  $$Width (m) = \sqrt{\frac{\text{Pond Area}}{1.5}}$$
-  $$Length (m) = 1.5 \times Width$$
-
-### F. Multi-Criteria Suitability Scoring
-Every cell is ranked on a scale of $0 - 100$:
-$$\text{Score} = w_{elev} \cdot S_{elev} + w_{slope} \cdot S_{slope} + w_{accum} \cdot S_{accum}$$
-- $S_{elev} = \frac{elev_{max} - elev}{elev_{max} - elev_{min}} \times 100$ (Low elevation preferred)
-- $S_{slope} = \max\left(0, \left(1 - \frac{\text{slope}}{15}\right) \times 100\right)$ (Flat slope preferred, slopes $> 15^{\circ}$ get 0 suitability)
-- $S_{accum} = \frac{\ln(flow\_accum)}{\ln(max\_accum)} \times 100$ (Log-scaled accumulation preferred)
-
----
-
-## 6. Installation & Environment Setup
-
-### Prerequisites
-Make sure Python 3.8+ and `pip` are installed on your machine.
-
-### Setup Instructions
-1. **Clone or download the project files** to your local directory.
-2. **Open a terminal** inside the root project directory:
-   ```bash
-   cd AI-POND
-   ```
-3. **Create a virtual environment** (recommended):
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
-4. **Install Python dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-5. **Configure Environment Variables:**
-   Rename the `.env.example` file to `.env` or create it manually:
-   ```bash
-   cp .env.example .env
-   ```
-
----
-
-## 7. How to Run & Test
-Start the local Flask development server:
-```bash
-python3 app.py
+## 4. Architecture
 ```
-By default, the server launches on **http://localhost:5000**. Open this address in any modern web browser to access the planner interface.
+┌─────────────────────────────────┐         ┌─────────────────────────────────┐
+│         FRONTEND (Vite)         │         │          BACKEND (FastAPI)       │
+│      http://localhost:5173      │  HTTP   │       http://localhost:8000      │
+│                                 │ ──────► │                                 │
+│  - index.html                   │  /api/* │  - FastAPI app                  │
+│  - css/command-center.css       │         │  - /api/analyzeContour (KML)     │
+│  - js/{app,command-center,      │         │  - /api/analyzeLocation         │
+│       location}.js              │         │  - /api/health                  │
+│  - Leaflet map workspace        │         │  - Static asset mounts          │
+└─────────────────────────────────┘         └─────────────────────────────────┘
+                                                        │
+                                                        ▼
+                                              ┌─────────────────────┐
+                                              │  External Services  │
+                                              │  - OpenTopography   │
+                                              │  - OpenStreetMap    │
+                                              │  - Nominatim        │
+                                              │  - Open-Meteo       │
+                                              └─────────────────────┘
+```
+
+## 5. Technology Stack
+### Backend
+- **Python 3.10+**
+- **FastAPI** + **Uvicorn**
+- **NumPy** & **SciPy** (Matrix computations, grid interpolation, spatial algorithms)
+- **Rasterio** (GeoTIFF generation and spatial raster handling)
+- **Shapely** & **PyProj** (Vector geometry and coordinate transformations)
+- **HTTPX** (Async requests to external APIs)
+
+### Frontend
+- **Vite 5** (Asset bundler and development proxy)
+- **Vanilla HTML5 / CSS3 / JavaScript (ES6+)**
+- **Leaflet 1.9.4** (Interactive mapping library)
+- **Google Fonts** (Inter & JetBrains Mono)
+
+## 6. Analysis Workflow
+1. **Define Analysis Area**: Specify a place name or upload a KML contour file.
+2. **Terrain Engine**: Generate grid DEM and derive slope matrix.
+3. **Hydrology Engine**: Compute sink-filled DEM, D8 flow directions, flow accumulation grid, and catchments.
+4. **Pond Intelligence**: Extract local flow accumulation peaks, filter excluded zones, calculate storage volume, compute suitability scores, and display candidate sites.
+
+## 7. Input Methods
+- **Select Location**: Input village or district name (e.g., "IIT Bhilai, Kutelabhata, Chhattisgarh, India") and select search radius (0.5 km to 10 km).
+- **Upload Contours**: Drop or select a valid `.kml` or `.kmz` file containing contour LineString vectors.
+
+## 8. Location Analysis
+When analyzing by location:
+1. Nominatim / Open-Meteo geocodes the input string to latitude and longitude.
+2. OpenTopography API downloads DEM raster tiles (Copernicus 30m / GLO-30).
+3. System extracts elevation grid and derives contours and hydrology models.
+
+## 9. Contour / KML Analysis
+When uploading a KML file:
+1. Parsed coordinates and elevation attributes are converted into 2D points.
+2. Grid bounds are constructed at user-defined spatial resolution (default 10m).
+3. Grid values are interpolated to construct a synthetic Digital Elevation Model.
+
+## 10. DEM Generation
+- Interpolation uses scipy griddata (Clough-Tocher / Linear / Nearest fallback).
+- Elevation range and grid resolution are dynamically computed and displayed in the Terrain Analysis overlay.
+
+## 11. Hydrology Analysis
+- **Sink Filling**: Priority-queue flood algorithm eliminates artificial depressions.
+- **Flow Direction**: D8 algorithm computes steepest descent path (1, 2, 4, 8, 16, 32, 64, 128 encoding).
+- **Flow Accumulation**: Iterative Kahn topological sort accumulates upstream contributing cell counts.
+- **Catchment Delineation**: Reverse breadth-first search (BFS) traces all cells draining into each candidate sink.
+
+## 12. Candidate Ranking
+Pond site candidates are selected using local accumulation maxima and scored (0 to 100):
+- **Flow Accumulation Weight**: Higher upstream contributing area increases score.
+- **Terrain Slope Weight**: Moderate slopes (1-5%) preferred; steep or flat terrain penalization.
+- **Storage Potential**: Volumetric capacity calculated from runoff formula $Q = P \times A \times C$.
+- **Land Status**: Unencumbered land receives higher priority.
+
+## 13. Output Files
+Generated outputs are stored in `data/generated/` and accessible via download links:
+- **GeoTIFF DEM**: Standard GIS raster file.
+- **Contour KML**: Vector contour lines formatted for Google Earth / GIS viewing.
+- **Contour GeoJSON**: Vector contour features for web mapping.
+
+## 14. Installation
+```bash
+# Clone repository
+cd AI-based-Village-Pond-Planning-System
+
+# Set up Python virtual environment
+python3 -m venv backend/venv
+source backend/venv/bin/activate
+pip install -r requirements.txt
+
+# Set up frontend dependencies
+cd frontend
+npm install
+cd ..
+```
+
+## 15. Running Backend
+```bash
+source backend/venv/bin/activate
+uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
+Backend will be available on `http://localhost:8000`.
+
+## 16. Running Frontend
+```bash
+cd frontend
+npm run dev
+```
+Frontend will be available on `http://localhost:5173`. API requests `/api/*` are automatically proxied to `http://localhost:8000`.
+
+## 17. Project Structure
+```
+AI-based-Village-Pond-Planning-System/
+├── backend/
+│   ├── main.py                 # FastAPI application entry point
+│   ├── api/                    # Route handlers (contour_routes, location_routes)
+│   ├── hydrology/              # Flow direction, accumulation, sink fill, catchment
+│   ├── pond/                   # Candidate selection & water balance metrics
+│   ├── services/               # DEM fetch, land filter, geocoding, rainfall
+│   ├── terrain/                # DEM generation & slope computation
+│   └── schemas/                # Pydantic response models
+├── frontend/
+│   ├── index.html              # Main HTML page shell
+│   ├── css/                    # Stylesheets (command-center.css, style.css)
+│   ├── js/                     # Scripts (app.js, command-center.js, location.js)
+│   ├── package.json            # Node dependencies
+│   └── vite.config.js          # Vite configuration
+├── data/                       # Cache & generated output files
+├── contours_1m.kml             # Sample contour test file
+├── requirements.txt            # Python dependencies
+└── README.md                   # Academic project documentation
+```
+
+## 18. Limitations
+- **Resolution**: Global DEM datasets (Copernicus 30m) provide general terrain guidance but lack high-precision micro-topography.
+- **Ground Truth Verification**: OpenStreetMap land exclusion filters depend on mapped spatial features. Field survey and soil testing are required prior to engineering execution.
+
+## 19. Future Work
+- Integration of high-resolution LiDAR / drone survey elevation rasters.
+- Detailed geotechnical soil permeability profiles.
+- Soil conservation and siltation estimation models.
 
 ---
-
-## 8. CONFIGURATION REQUIRED FROM USER
-This application is fully functional out of the box. Because it connects to public APIs, **no commercial API keys (like Google Maps or ArcGIS) are required**.
-
-However, to comply with OpenStreetMap's Nominatim usage policies and avoid request throttling, please verify the following:
-1. **Custom User-Agent:**
-   Open the `.env` file in the root directory and ensure the `GEOCONTROLLER_USER_AGENT` variable is defined:
-   ```env
-   GEOCONTROLLER_USER_AGENT=AI-VillagePondPlanner/1.0 (contact: college-project@domain.com)
-   ```
-   *Nominatim requires a descriptive user agent to identify your request origin and prevent blocking.*
-
----
-
-## 9. How to Use the Dashboard
-1. **Run a Quick Demo (Offline Friendly):**
-   Ensure the **DEMO MODE** checkbox is checked in the sidebar. Click **"Run AI Pond Analysis"**. The system instantly renders a synthetic valley basin showing contour gradients, flow paths, catchment areas, and candidate markers.
-2. **Analyze a Real Location:**
-   - Uncheck the **DEMO MODE** checkbox.
-   - Enter a village or location in the search bar (e.g. `"Malpura, Rajasthan"` or `"Palampur, Himachal Pradesh"`). Click search or hit Enter.
-   - The geocoder will update the Latitude and Longitude coordinates.
-   - Adjust target pond depth, runoff soil type, or MCDA criteria weights (moving a weight slider dynamically adjusts others to sum to 100%).
-   - Click **"Run AI Pond Analysis"**. The server fetches real elevation grids from the Open-Meteo elevation model and weather archives to generate real field planning parameters!
-3. **Toggle Map Layers:**
-   Move your mouse over the Legend control panel on the map to switch raster views between Suitability, Elevation, Slope, and Flow accumulation.
-4. **Inspect Candidates:**
-   Click any candidate marker (numbered 1-4) on the map. The map will display that site's specific drainage catchment outline and update the metrics card with exact sizing specs.
-
----
-
-## 10. API Documentation
-
-### `GET /api/geocode`
-Resolves address search queries to coordinates.
-- **Query Parameter:** `query` (string)
-- **Response (200 OK):**
-  ```json
-  {
-    "lat": 26.2974,
-    "lon": 75.3804,
-    "display_name": "Malpura, Tonk District, Rajasthan, India"
-  }
-  ```
-
-### `POST /api/analyze`
-Executes terrain routing, catchment, runoff, and suitability scoring.
-- **Request Body (JSON):**
-  ```json
-  {
-    "latitude": 26.2974,
-    "longitude": 75.3804,
-    "cell_spacing": 50,
-    "grid_size": 11,
-    "soil_type": "loam_soil",
-    "pond_depth": 2.5,
-    "target_fraction": 0.15,
-    "demo_mode": false,
-    "weights": {
-      "elevation": 25,
-      "slope": 35,
-      "accumulation": 40
-    }
-  }
-  ```
-- **Response (200 OK):** Returns metadata, raw 2D grid matrix lists (for map heatmaps), candidate site indices, catchment coordinates, and recommended dimensions.
-
----
-
-## 11. Limitations & Future Improvements
-- **Simplified Hydraulics:** Calculations use a single runoff coefficient. A production system would use the NRCS Curve Number method with daily storm logs.
-- **First-Order Pond Shapes:** Assumes rectangular boxes. Real pond construction requires trapezoidal cuts with stable side slopes (e.g. 1.5:1 or 2:1 side slope ratio).
-- **Static Resolution:** Grid points are spacing-based approximations. Integrations with high-resolution satellite DEMs (ALOS/SRTM/LiDAR) via GeoTIFF file uploads would yield finer output.
-- **Land Ownership:** Does not check land tenure. Official cadastral surveys must be performed to verify community vs. private land holdings.
+*Developed for academic evaluation and geospatial decision support research.*

@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Pond Intelligence Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="./css/command-center.css">
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+
+<!-- =====================================================
+     APP SHELL
+     ===================================================== -->
+
+<div class="app-shell">
+
+  <!-- =====================================================
+       APP HEADER
+       ===================================================== -->
+
+  <header class="app-header">
+
+    <div class="app-header__brand">
+      <div class="app-header__logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 12C2 12 5 7 12 7C19 7 22 12 22 12C22 12 19 17 12 17C5 17 2 12 2 12Z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+      </div>
+      <div class="app-header__title-block">
+        <span class="app-header__title">AI Pond Intelligence Platform</span>
+        <span class="app-header__subtitle">Geospatial Decision Support System</span>
+      </div>
+    </div>
+
+    <div class="app-header__center">
+      <span id="headerStatusText">AWAITING ANALYSIS INPUT</span>
+    </div>
+
+    <div class="app-header__right">
+      <div class="status-indicator">
+        <span class="status-indicator__dot status-indicator__dot--idle" id="statusDot"></span>
+        <span id="statusText">STANDBY</span>
+      </div>
+      <span class="version-badge">v1.0</span>
+    </div>
+
+  </header>
+
+  <!-- =====================================================
+       MAIN CONTENT
+       ===================================================== -->
+
+  <main class="app-main">
+
+    <!-- =====================================================
+         LEFT: WORKFLOW PANEL
+         ===================================================== -->
+
+    <aside class="workflow-panel" id="workflowPanel">
+
+      <div class="workflow-panel__header">
+        <div class="workflow-panel__label">Analysis Workflow</div>
+        <div class="workflow-panel__title">Terrain Intelligence</div>
+      </div>
+
+      <div class="workflow-panel__body">
+
+        <!-- INPUT MODE TOGGLE -->
+        <div class="input-mode-toggle">
+          <button class="input-mode-toggle__btn input-mode-toggle__btn--active" id="modeLocationBtn" data-mode="location">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+            Select Location
+          </button>
+          <button class="input-mode-toggle__btn" id="modeUploadBtn" data-mode="upload">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Upload Contours
+          </button>
+        </div>
+
+        <!-- WORKFLOW STEPS -->
+        <div class="workflow-stepper">
+
+          <!-- STEP 01: DEFINE AREA -->
+          <div class="workflow-step workflow-step--active" id="step01" data-step="01">
+            <div class="workflow-step__marker">01</div>
+            <div class="workflow-step__label">STEP ONE</div>
+            <div class="workflow-step__title">Define Analysis Area</div>
+            <div class="workflow-step__hint">Select location or upload contour file</div>
+            <div class="workflow-step__body">
+
+              <!-- LOCATION MODE -->
+              <div id="locationModeContent">
+                <div class="field-group">
+                  <label class="field-label" for="locationName">Location Name</label>
+                  <input type="text" id="locationName" class="field-input" value="IIT Bhilai, Kutelabhata, Chhattisgarh, India" placeholder="Village, city, district...">
+                  <input type="hidden" id="analysisRadius" value="3000">
+                </div>
+                <div class="field-group">
+                  <label class="field-label">Analysis Radius</label>
+                  <div class="radius-selector">
+                    <button class="radius-btn" data-radius="500">0.5 km</button>
+                    <button class="radius-btn radius-btn--active" data-radius="3000">3 km</button>
+                    <button class="radius-btn" data-radius="5000">5 km</button>
+                    <button class="radius-btn" data-radius="10000">10 km</button>
+                  </div>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="autoContourInterval">Contour Interval (m)</label>
+                  <input type="number" id="autoContourInterval" class="field-input" value="5" min="1" max="50" step="1">
+                </div>
+                <button class="btn-primary" id="analyzeLocationBtn">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                  Run Location Analysis
+                </button>
+                <p id="locationStatus"></p>
+              </div>
+
+              <!-- UPLOAD MODE -->
+              <div id="uploadModeContent" class="hidden">
+                <div class="upload-zone" id="uploadZone">
+                  <div class="upload-zone__icon">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  </div>
+                  <div class="upload-zone__text">Drop contour file here</div>
+                  <div class="upload-zone__hint">KML / KMZ</div>
+                  <input type="file" id="contourFile" accept=".kml,.kmz">
+                </div>
+                <div id="uploadedFileDisplay"></div>
+                <div class="field-group">
+                  <label class="field-label" for="resolution">DEM Resolution (m)</label>
+                  <input type="number" id="resolution" class="field-input" value="10" min="2" max="100" step="1">
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="maxCandidates">Max Candidates</label>
+                  <input type="number" id="maxCandidates" class="field-input" value="20" min="1" max="50" step="1">
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="rainfallYears">Rainfall History (Years)</label>
+                  <input type="number" id="rainfallYears" class="field-input" value="5" min="1" max="30" step="1">
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="runoffCoefficient">Runoff Coefficient</label>
+                  <input type="number" id="runoffCoefficient" class="field-input" value="0.30" min="0" max="1" step="0.05">
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="pondRadius">Pond Search Radius (m)</label>
+                  <input type="number" id="pondRadius" class="field-input" value="40" min="10" max="150" step="5">
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="maxDepth">Max Pond Depth (m)</label>
+                  <input type="number" id="maxDepth" class="field-input" value="3" min="1" max="6" step="0.5">
+                </div>
+                <button class="btn-primary" id="analyzeBtn">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  Analyze Contour File
+                </button>
+                <p id="status"></p>
+                <div id="generatedFiles"></div>
+              </div>
+
+            </div>
+          </div>
+
+          <div class="workflow-divider"></div>
+
+          <!-- STEP 02: TERRAIN ENGINE -->
+          <div class="workflow-step" id="step02" data-step="02">
+            <div class="workflow-step__marker">02</div>
+            <div class="workflow-step__label">STEP TWO</div>
+            <div class="workflow-step__title">Terrain Engine</div>
+            <div class="workflow-step__hint">DEM generation, elevation model, contour extraction</div>
+          </div>
+
+          <div class="workflow-divider"></div>
+
+          <!-- STEP 03: HYDROLOGY -->
+          <div class="workflow-step" id="step03" data-step="03">
+            <div class="workflow-step__marker">03</div>
+            <div class="workflow-step__label">STEP THREE</div>
+            <div class="workflow-step__title">Hydrology Engine</div>
+            <div class="workflow-step__hint">Flow direction, accumulation, drainage network</div>
+          </div>
+
+          <div class="workflow-divider"></div>
+
+          <!-- STEP 04: RESULTS -->
+          <div class="workflow-step" id="step04" data-step="04">
+            <div class="workflow-step__marker">04</div>
+            <div class="workflow-step__label">STEP FOUR</div>
+            <div class="workflow-step__title">Pond Intelligence</div>
+            <div class="workflow-step__hint">Candidate ranking, catchment delineation, suitability scoring</div>
+          </div>
+
+        </div><!-- .workflow-stepper -->
+      </div><!-- .workflow-panel__body -->
+    </aside>
+
+    <!-- =====================================================
+         CENTER: MAP WORKSPACE
+         ===================================================== -->
+
+    <div class="workspace">
+
+      <div id="map"></div>
+
+      <!-- MAP OVERLAY: TOP LEFT -->
+      <div class="map-overlay map-overlay--topleft">
+        <div class="map-overlay__header">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+          <span class="map-overlay__title">Terrain Analysis</span>
+        </div>
+        <div class="map-overlay__body">
+          <div class="terrain-info" id="terrainInfo">
+            <div class="terrain-info__row">
+              <span class="terrain-info__key">Status</span>
+              <span class="terrain-info__tag terrain-info__tag--dem" id="terrainStatus">AWAITING INPUT</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MAP OVERLAY: TOP RIGHT -->
+      <div class="map-overlay map-overlay--topright">
+        <div class="map-overlay__header">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+          <span class="map-overlay__title">Map Layers</span>
+        </div>
+        <div class="map-overlay__body">
+          <div class="map-layers">
+            <div class="map-layers__list">
+              <label class="map-layers__item">
+                <input type="checkbox" id="layerStreet" checked>
+                Street Map
+              </label>
+              <label class="map-layers__item">
+                <input type="checkbox" id="layerSatellite">
+                Satellite
+              </label>
+              <label class="map-layers__item">
+                <input type="checkbox" id="layerContours" checked>
+                Contours
+              </label>
+              <label class="map-layers__item">
+                <input type="checkbox" id="layerCandidates" checked>
+                Candidates
+              </label>
+              <label class="map-layers__item">
+                <input type="checkbox" id="layerCatchment" checked>
+                Catchment
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MAP OVERLAY: BOTTOM RIGHT -->
+      <div class="map-overlay map-overlay--bottomright">
+        <div class="map-overlay__header">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <span class="map-overlay__title">Map Legend</span>
+        </div>
+        <div class="map-overlay__body">
+          <div class="map-legend-overlay">
+            <div class="map-legend-overlay__list">
+              <div class="map-legend-overlay__item">
+                <span class="legend-mark legend-mark--rank1"></span>
+                <span>Top Rank Candidate</span>
+              </div>
+              <div class="map-legend-overlay__item">
+                <span class="legend-mark legend-mark--rank2"></span>
+                <span>Rank 2-3 Candidate</span>
+              </div>
+              <div class="map-legend-overlay__item">
+                <span class="legend-mark legend-mark--other"></span>
+                <span>Other Candidates</span>
+              </div>
+              <div class="map-legend-overlay__item">
+                <span class="legend-polygon legend-polygon--catchment"></span>
+                <span>Catchment Area</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CANDIDATE INSPECTOR -->
+      <div class="candidate-inspector candidate-inspector--hidden" id="candidateInspector">
+        <div class="candidate-inspector__header">
+          <div class="candidate-inspector__rank">
+            <span class="candidate-inspector__rank-badge">CANDIDATE</span>
+            <span class="candidate-inspector__rank-number" id="inspectorRank">--</span>
+          </div>
+          <span class="candidate-inspector__best-tag" id="inspectorBestTag">BEST</span>
+          <div class="candidate-inspector__close" id="inspectorClose">&times;</div>
+        </div>
+        <div class="candidate-inspector__score-section">
+          <div class="candidate-inspector__score" id="inspectorScore">--</div>
+          <div class="candidate-inspector__score-label">SUITABILITY SCORE</div>
+          <div class="candidate-inspector__rating" id="inspectorRating">--</div>
+        </div>
+        <div class="candidate-inspector__metrics">
+          <div class="candidate-inspector__metric">
+            <div class="candidate-inspector__metric-header">
+              <span class="candidate-inspector__metric-name">Flow Accumulation</span>
+              <span class="candidate-inspector__metric-value" id="inspectorFlow">--</span>
+            </div>
+            <div class="metric-bar">
+              <div class="metric-bar__fill metric-bar__fill--primary" id="inspectorFlowBar" style="width:100%"></div>
+            </div>
+          </div>
+          <div class="candidate-inspector__metric">
+            <div class="candidate-inspector__metric-header">
+              <span class="candidate-inspector__metric-name">Valley Position</span>
+              <span class="candidate-inspector__metric-value" id="inspectorValley">--</span>
+            </div>
+            <div class="metric-bar">
+              <div class="metric-bar__fill metric-bar__fill--primary" id="inspectorValleyBar" style="width:99%"></div>
+            </div>
+          </div>
+          <div class="candidate-inspector__metric">
+            <div class="candidate-inspector__metric-header">
+              <span class="candidate-inspector__metric-name">Drainage</span>
+              <span class="candidate-inspector__metric-value" id="inspectorDrainage">--</span>
+            </div>
+            <div class="metric-bar">
+              <div class="metric-bar__fill metric-bar__fill--selected" id="inspectorDrainageBar" style="width:100%"></div>
+            </div>
+          </div>
+        </div>
+        <div class="candidate-inspector__divider"></div>
+
+        <!-- MULTI-FACTOR SCORE -->
+        <div class="mf-inspector" id="mfInspector">
+          <div class="mf-inspector__header">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            MULTI-FACTOR SUITABILITY
+            <span class="mf-inspector__confidence" id="inspectorConfidence"></span>
+          </div>
+          <div class="mf-inspector__hero">
+            <div class="mf-inspector__score" id="inspectorMFScore">--</div>
+            <div class="mf-inspector__meta">
+              <div class="mf-inspector__category" id="inspectorMFCategory">N/A</div>
+              <div class="mf-inspector__factors" id="inspectorMFFactors"></div>
+            </div>
+          </div>
+          <div class="mf-inspector__bar-wrap">
+            <div class="mf-inspector__bar" id="inspectorMFBBar" style="width:0%"></div>
+          </div>
+          <div class="mf-inspector__unavailable" id="inspectorMFUnavailable" style="display:none">
+            Unavailable: <span id="inspectorMFUnavailableList"></span>
+          </div>
+        </div>
+
+        <div class="candidate-inspector__divider"></div>
+        <div class="candidate-inspector__quick-stats">
+          <div class="quick-stat">
+            <span class="quick-stat__label">Elevation</span>
+            <span class="quick-stat__value" id="inspectorElev">--</span>
+          </div>
+          <div class="quick-stat">
+            <span class="quick-stat__label">Catchment</span>
+            <span class="quick-stat__value" id="inspectorCatchment">--</span>
+          </div>
+          <div class="quick-stat">
+            <span class="quick-stat__label">Upstream Cells</span>
+            <span class="quick-stat__value" id="inspectorCells">--</span>
+          </div>
+          <div class="quick-stat">
+            <span class="quick-stat__label">Storage</span>
+            <span class="quick-stat__value" id="inspectorStorage">--</span>
+          </div>
+        </div>
+        <div class="candidate-inspector__footer">
+          <button class="btn-secondary" id="viewFullAnalysisBtn">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+            View Full Analysis
+          </button>
+        </div>
+      </div>
+
+      <!-- NO RESULTS STATE -->
+      <div class="no-results" id="noResults">
+        <div class="no-results__panel">
+          <div class="no-results__icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          </div>
+          <div class="no-results__title">No Suitable Pond Locations Identified</div>
+          <div class="no-results__message">
+            The terrain analysis completed successfully, but no locations satisfied the required hydrological and terrain constraints.
+          </div>
+          <button class="btn-secondary" id="viewDiagnosticsBtn">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            View Terrain Diagnostics
+          </button>
+        </div>
+      </div>
+
+      <!-- ANALYSIS PROGRESS -->
+      <div class="analysis-progress" id="analysisProgress">
+        <div class="analysis-progress__panel">
+          <div class="analysis-progress__title">Terrain Intelligence Engine</div>
+          <div class="analysis-progress__steps" id="progressSteps">
+            <div class="progress-step progress-step--done" id="progStep1">
+              <span class="progress-step__icon">&radic;</span>
+              <span class="progress-step__text">Terrain acquired</span>
+            </div>
+            <div class="progress-step progress-step--done" id="progStep2">
+              <span class="progress-step__icon">&radic;</span>
+              <span class="progress-step__text">Elevation model generated</span>
+            </div>
+            <div class="progress-step progress-step--done" id="progStep3">
+              <span class="progress-step__icon">&radic;</span>
+              <span class="progress-step__text">Hydrology model calculated</span>
+            </div>
+            <div class="progress-step progress-step--done" id="progStep4">
+              <span class="progress-step__icon">&radic;</span>
+              <span class="progress-step__text">Flow network extracted</span>
+            </div>
+            <div class="progress-step progress-step--done" id="progStep5">
+              <span class="progress-step__icon">&radic;</span>
+              <span class="progress-step__text">Water bodies evaluated</span>
+            </div>
+            <div class="progress-step progress-step--active" id="progStep6">
+              <span class="progress-step__icon">&#9679;</span>
+              <span class="progress-step__text" id="progStep6Text">Ranking optimal pond locations...</span>
+            </div>
+          </div>
+          <div class="analysis-progress__bar">
+            <div class="analysis-progress__bar-fill" id="progressBarFill" style="width:0%"></div>
+          </div>
+          <div class="analysis-progress__pct" id="progressPct">Processing: 0%</div>
+        </div>
+      </div>
+
+    </div><!-- .workspace -->
+
+    <!-- =====================================================
+         BOTTOM: CANDIDATE STRIP
+         ===================================================== -->
+
+    <div class="candidate-strip candidate-strip--empty" id="candidateStrip">
+      <div class="candidate-strip__header">
+        <span class="candidate-strip__title">Top Pond Locations &mdash; Ranked by Suitability</span>
+        <span class="candidate-strip__count" id="stripCount">0 candidates</span>
+      </div>
+      <div class="candidate-strip__scroll" id="stripScroll">
+        <!-- Candidate cards injected by JS -->
+      </div>
+    </div>
+
+  </main><!-- .app-main -->
+
+</div><!-- .app-shell -->
+
+<!-- =====================================================
+     ANALYSIS DRAWER (SLIDE-IN)
+     ===================================================== -->
+
+<div class="analysis-drawer-overlay" id="drawerOverlay"></div>
+<div class="analysis-drawer" id="analysisDrawer">
+  <div class="analysis-drawer__header">
+    <span class="analysis-drawer__title">Full Terrain Analysis</span>
+    <div class="analysis-drawer__close" id="drawerClose">&times;</div>
+  </div>
+  <div class="analysis-drawer__body" id="drawerBody">
+    <!-- Content injected by JS -->
+  </div>
+</div>
+
+<!-- =====================================================
+     SCRIPTS
+     ===================================================== -->
+
+<!-- Legacy placeholders (hidden) for app.js / location.js compatibility -->
+<div style="display:none !important;visibility:hidden !important;height:0;width:0;overflow:hidden;position:absolute;left:-9999px;">
+  <div id="results"></div>
+  <div id="candidateTableWrap"></div>
+  <table id="candidateTable"></table>
+  <div id="mapsContainer"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="./js/app.js"></script>
+<script src="./js/location.js"></script>
+<script src="./js/command-center.js"></script>
+
+</body>
+</html>
