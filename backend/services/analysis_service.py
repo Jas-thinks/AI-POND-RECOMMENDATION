@@ -45,7 +45,6 @@ from backend.services.kml_service import (
 )
 
 from backend.services.land_service import (
-    DEFAULT_BUFFER_CONFIG,
     build_osm_free_land_mask,
 )
 
@@ -93,10 +92,6 @@ from backend.services.data_confidence import (
     assess_confidence,
 )
 
-from backend.services.development_risk import (
-    build_development_risk,
-)
-
 from backend.terrain.slope import (
     calculate_slope_percent,
 )
@@ -108,21 +103,6 @@ from backend.utils.timing import (
 from backend.utils.timing import (
     timed_stage,
 )
-
-
-# ----------------------------------------------------------------------------
-# Additive development-risk penalty
-#
-# Applied AFTER the existing multi-factor suitability score is computed, so the
-# underlying terrain/hydrology/suitability formula is never rewritten. This is
-# a clearly separated, data-driven preference layer:
-#   * low development risk (score 100)  -> penalty 0   (unchanged)
-#   * medium development risk (score 40) -> penalty 9
-#   * very high development risk (0)     -> penalty 15 (candidates excluded anyway)
-#
-# The penalty is additive to the final multi-factor score before ranking.
-# ----------------------------------------------------------------------------
-DEV_RISK_PENALTY_SLOPE = 0.15  # max points deducted per 100-risk unit
 
 
 # ---------------------------------------------------------
@@ -341,33 +321,6 @@ def analyze_contour_file(
 
             safety_buffer_m=
                 10.0,
-
-            buffer=
-                DEFAULT_BUFFER_CONFIG,
-        )
-    )
-
-    # =====================================================
-    # STEP 8b
-    # FUTURE DEVELOPMENT RISK
-    #
-    # Estimates how likely an area is to be developed from
-    # existing mapped buildings, road proximity and built-up
-    # land use (reusing the OSM data already fetched for the
-    # land filter; no additional HTTP request).
-    #
-    # Very-high-risk cells are hard-excluded. Medium-risk cells
-    # are not excluded but are ranked below low-risk cells.
-    #
-    # This is NOT a prediction of future buildings; it is a
-    # data-driven development-risk estimate using currently
-    # available information.
-    # =====================================================
-
-    dev_risk = (
-        build_development_risk(
-            land_filter,
-            terrain,
         )
     )
 
@@ -387,10 +340,7 @@ def analyze_contour_file(
                 accumulation,
 
                 # THIS IS THE IMPORTANT CHANGE
-                (
-                    land_filter.free_land_mask
-                    & ~dev_risk.high_risk_mask
-                ),
+                land_filter.free_land_mask,
 
                 terrain.resolution_m,
 
@@ -608,36 +558,7 @@ def analyze_contour_file(
     
                     "longitude":
                         float(longitude),
-
-                    "development_risk": {
-                        "score":
-                            round(
-                                float(
-                                    dev_risk.risk_score_grid[
-                                        row,
-                                        column,
-                                    ]
-                                ),
-                                1,
-                            ),
-                        "level":
-                            (
-                                "very_high"
-                                if dev_risk.high_risk_mask[
-                                    row,
-                                    column
-                                ]
-                                else (
-                                    "medium"
-                                    if dev_risk.risk_score_grid[
-                                        row,
-                                        column
-                                    ] < 100.0
-                                    else "low"
-                                )
-                            ),
-                    },
-
+    
                     "elevation_m":
                         round(
                             float(
@@ -794,37 +715,6 @@ def analyze_contour_file(
                 water_availability=water_avail,
                 land_use_analysis=land_use_analysis,
                 accessibility_analysis=accessibility,
-            )
-
-            # Applying an additive, data-driven development-risk penalty to the
-            # final multi-factor score. This is layered ON TOP of the existing
-            # suitability calculation (which is left untouched) so that low-risk
-            # areas are preferred and medium/high-risk areas rank lower.
-            risk_score = float(
-                cand.get(
-                    "development_risk",
-                    {},
-                ).get(
-                    "score",
-                    100.0,
-                )
-            )
-
-            base_score = float(
-                mf_score.get(
-                    "final_score",
-                    cand.get("suitability_score", 0.0),
-                )
-            )
-
-            adjusted_score = base_score - (
-                (100.0 - risk_score)
-                * DEV_RISK_PENALTY_SLOPE
-            )
-
-            mf_score["final_score"] = round(
-                max(0.0, adjusted_score),
-                1,
             )
     
             mf_candidates.append({

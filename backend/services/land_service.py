@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 import hashlib
 import json
@@ -41,33 +41,6 @@ OVERPASS_ENDPOINTS = (
 
 
 # ---------------------------------------------------------
-# Configurable exclusion buffers
-# ---------------------------------------------------------
-
-@dataclass(frozen=True)
-class BufferConfig:
-    """Distances used to set pond candidates back from mapped features.
-
-    All values are in metres and represent the *additional* set-back applied
-    beyond the proposed pond footprint (so the whole estimated pond stays
-    clear of the feature). Defaults are sized to a coarse raster
-    (e.g. 10-30 m cells) without needlessly rejecting large areas on dense
-    maps:
-
-        road_buffer_m      : extra set-back from road/street centre lines.
-        building_buffer_m  : extra set-back from building footprints.
-        safety_buffer_m    : generic set-back for water/waterway features.
-    """
-
-    road_buffer_m: float = 15.0
-    building_buffer_m: float = 10.0
-    safety_buffer_m: float = 10.0
-
-
-DEFAULT_BUFFER_CONFIG = BufferConfig()
-
-
-# ---------------------------------------------------------
 # Result object
 # ---------------------------------------------------------
 
@@ -87,17 +60,6 @@ class LandFilterResult:
 
     notes: list[str]
 
-    # Raw Overpass elements (ways/relations with tags + geometry) used to build
-    # the exclusion mask. Exposed so downstream layers (e.g. the data-driven
-    # "future development risk" score) can reuse the same already-fetched data
-    # without making an additional HTTP request.
-    osm_elements: list = field(default_factory=list)
-
-    # Per-category boolean exclusion masks (same shape as the DEM) so callers
-    # can reason about *why* a cell was excluded. Keys: water, waterway, road,
-    # building, builtup.
-    category_masks: dict = field(default_factory=dict)
-
 
 # ---------------------------------------------------------
 # Decide which OSM features should be excluded
@@ -113,7 +75,6 @@ def _category(tags: dict) -> str | None:
         waterway
         road
         building
-        builtup   (development indicator, not a hard exclusion by itself)
     """
 
     if tags.get("building"):
@@ -121,17 +82,6 @@ def _category(tags: dict) -> str | None:
 
     if tags.get("highway"):
         return "road"
-
-    if tags.get("landuse") in {
-        "residential",
-        "commercial",
-        "industrial",
-        "retail",
-        "cemetery",
-        "construction",
-        "garages",
-    }:
-        return "builtup"
 
     if tags.get("natural") in {
         "water",
@@ -496,9 +446,7 @@ def _project_and_buffer(
     tags: dict,
     to_projected,
     pond_radius_m: float,
-    safety_buffer_m: float = 10.0,
-    road_buffer_m: float = 15.0,
-    building_buffer_m: float = 10.0,
+    safety_buffer_m: float,
 ):
 
     # Convert latitude/longitude to metre coordinates
@@ -521,8 +469,6 @@ def _project_and_buffer(
 
     if category == "water":
 
-        # Water bodies are already hard exclusions; the set-back keeps the
-        # whole pond footprint clear of the water's edge.
         distance = (
             pond_radius_m
             + safety_buffer_m
@@ -530,25 +476,23 @@ def _project_and_buffer(
 
     elif category == "building":
 
-        # Configurable building safety buffer (default 10 m) beyond the pond
-        # footprint so a pond is not recommended immediately beside a building.
         distance = (
             pond_radius_m
             + max(
-                building_buffer_m,
+                5.0,
                 safety_buffer_m,
             )
         )
 
     elif category == "road":
 
-        # OSM roads are normally centre lines, not full road polygons.
-        # Configurable road safety buffer (default 15 m) keeps the pond
-        # footprint clear of both the carriageway and its verge.
+        # OSM roads are normally center lines,
+        # not full road polygons.
+
         distance = (
             pond_radius_m
             + max(
-                road_buffer_m,
+                6.0,
                 safety_buffer_m,
             )
         )
@@ -561,6 +505,7 @@ def _project_and_buffer(
 
         # Approximate half-width where OSM gives
         # only the river/stream centre line.
+
         half_width = {
 
             "river": 20.0,
@@ -605,7 +550,6 @@ def build_osm_free_land_mask(
     boundary_wgs84,
     pond_radius_m: float,
     safety_buffer_m: float = 10.0,
-    buffer: BufferConfig | None = None,
 ) -> LandFilterResult:
 
     """
@@ -631,9 +575,6 @@ def build_osm_free_land_mask(
         legally available land
         public land
     """
-
-    if buffer is None:
-        buffer = DEFAULT_BUFFER_CONFIG
 
     # -----------------------------------------------------
     # Download OpenStreetMap features
@@ -686,15 +627,9 @@ def build_osm_free_land_mask(
         "road": 0,
 
         "building": 0,
-
-        "builtup": 0,
     }
 
     buffered_geometries = []
-
-    # Per-category clipped exclusion geometries (projected CRS) so we can build
-    # category-specific masks for the "why was this excluded" / risk layers.
-    proj_categories: dict[str, list] = {}
 
     # -----------------------------------------------------
     # Convert every OSM object into an exclusion polygon
@@ -754,11 +689,7 @@ def build_osm_free_land_mask(
             pond_radius_m=
                 pond_radius_m,
             safety_buffer_m=
-                buffer.safety_buffer_m,
-            road_buffer_m=
-                buffer.road_buffer_m,
-            building_buffer_m=
-                buffer.building_buffer_m,
+                safety_buffer_m,
         )
 
         if (
@@ -780,13 +711,6 @@ def build_osm_free_land_mask(
             continue
 
         buffered_geometries.append(
-            clipped
-        )
-
-        proj_categories.setdefault(
-            category,
-            [],
-        ).append(
             clipped
         )
 
@@ -835,40 +759,6 @@ def build_osm_free_land_mask(
                 terrain.valid_mask,
                 dtype=bool,
             )
-        )
-
-    # -----------------------------------------------------
-    # Per-category exclusion masks
-    #
-    # Built from the same projected, boundary-clipped, buffered
-    # geometries used for the combined mask, so the category masks
-    # are perfectly consistent. These let downstream layers answer
-    # "why was a cell excluded?" without re-rasterising anything.
-    # -----------------------------------------------------
-
-    category_masks: dict[str, np.ndarray] = {}
-
-    for category, geometries in proj_categories.items():
-
-        if not geometries:
-            continue
-
-        geometry_union = unary_union(
-            geometries
-        )
-
-        category_masks[category] = geometry_mask(
-            [
-                mapping(
-                    geometry_union
-                )
-            ],
-            out_shape=
-                terrain.valid_mask.shape,
-            transform=
-                terrain.transform,
-            invert=True,
-            all_touched=True,
         )
 
     # -----------------------------------------------------
@@ -939,12 +829,6 @@ def build_osm_free_land_mask(
         free_cell_count=int(
             free_land_mask.sum()
         ),
-
-        osm_elements=
-            elements,
-
-        category_masks=
-            category_masks,
 
         notes=[
             (
