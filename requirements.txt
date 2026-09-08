@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+numpy
+scipy
+pandas
+requests
+httpx
+rasterio
+shapely
+pyproj
+scikit-image
+python-multipart
