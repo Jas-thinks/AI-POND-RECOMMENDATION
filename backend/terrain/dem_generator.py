@@ -11,6 +11,18 @@ from shapely.ops import transform as shapely_transform
 from backend.services.kml_service import ParsedContourMap
 
 
+# ------------------------------------------------------------
+# DEM SIZE SAFETY LIMITS
+#
+# These protect the worker/process from accidentally allocating an
+# enormous in-memory raster. They are sized for a modest (e.g. 512 MB)
+# single-instance deployment. Reasonable defaults can be overridden by
+# passing ``max_cells`` / ``max_dimension`` to ``build_dem``.
+# ------------------------------------------------------------
+DEFAULT_MAX_CELLS = 150_000       # ~390x390 grid of float64 DEM cells
+DEFAULT_MAX_DIMENSION = 1_500     # cap per grid axis (rows and columns)
+
+
 @dataclass
 class TerrainGrid:
     dem: np.ndarray
@@ -56,7 +68,8 @@ def _sample_contour_points(parsed: ParsedContourMap, max_points: int = 60000):
 def build_dem(
     parsed: ParsedContourMap,
     resolution_m: float = 10.0,
-    max_cells: int = 250000,
+    max_cells: int = DEFAULT_MAX_CELLS,
+    max_dimension: int = DEFAULT_MAX_DIMENSION,
 ) -> TerrainGrid:
     poly = Polygon(parsed.boundary_wgs84)
     if not poly.is_valid:
@@ -75,11 +88,48 @@ def build_dem(
     rows = int(np.ceil(height_m / resolution_m))
     cols = int(np.ceil(width_m / resolution_m))
 
+    # -------------------------------------------------------
+    # GRID SAFETY LIMITS
+    #
+    # 1. If the raw grid is too large, coarsen the effective
+    #    resolution so the total number of DEM cells never
+    #    exceeds ``max_cells``. This is graceful: analysis still
+    #    runs, at a coarser (but still valid) resolution.
+    # 2. If the area is so elongated that a single axis would
+    #    still exceed ``max_dimension`` even after coarsening,
+    #    the request is genuinely too large to process safely
+    #    and we raise a clear error instead of crashing.
+    #
+    # The resulting coarsened ``resolution_m`` is returned on the
+    # ``TerrainGrid`` so callers can report the *effective*
+    # resolution actually used.
+    # -------------------------------------------------------
+    scale = 1.0
     if rows * cols > max_cells:
-        scale = np.sqrt((rows * cols) / max_cells)
+        scale = float(np.sqrt((rows * cols) / max_cells))
         resolution_m = float(resolution_m * scale)
         rows = int(np.ceil(height_m / resolution_m))
         cols = int(np.ceil(width_m / resolution_m))
+
+    if scale > 1.0 or rows > max_dimension or cols > max_dimension:
+        # Verify we landed inside the per-axis bound after coarsening.
+        if rows > max_dimension or cols > max_dimension:
+            raise ValueError(
+                "The requested analysis area/resolution would produce a DEM "
+                "grid larger than this deployment can safely process "
+                f"(grid {rows} x {cols} cells, axis limit {max_dimension}). "
+                "Reduce the analysis area, increase the resolution (cell size), "
+                "or use a smaller search radius, then try again."
+            )
+        if scale > 1.0:
+            # Emit a diagnostic hint about the coarsened resolution. Callers
+            # surface the effective resolution through ``grid_resolution_m``.
+            import logging
+            logging.getLogger("analysis.pipeline").info(
+                "[ANALYSIS] DEM grid reduced by coarsening resolution "
+                "%.2fm -> %.2fm (%d x %d cells)",
+                float(resolution_m / scale), float(resolution_m), rows, cols,
+            )
 
     transform = from_origin(minx, maxy, resolution_m, resolution_m)
 
@@ -98,9 +148,16 @@ def build_dem(
     if np.isnan(dem[inv_mask]).any():
         dem_lin = griddata(points, elevs, (grid_x, grid_y), method="linear")
         dem = np.where(np.isnan(dem), dem_lin, dem)
+        del dem_lin  # release temporary interpolation buffer promptly
     if np.isnan(dem[inv_mask]).any():
         dem_near = griddata(points, elevs, (grid_x, grid_y), method="nearest")
         dem = np.where(np.isnan(dem), dem_near, dem)
+        del dem_near  # release temporary interpolation buffer promptly
+
+    # The full-resolution coordinate meshes are no longer needed once the DEM
+    # has been interpolated. Free them now rather than carrying two extra
+    # grid-sized float64 arrays for the rest of the pipeline.
+    del grid_x, grid_y, points, pts_x, pts_y
 
     dem[~inv_mask] = np.nan
 

@@ -3,6 +3,13 @@ __pycache__/
 *.py[cod]
 *.pyo
 
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
 # Virtual environments
 venv/
 .venv/
@@ -31,6 +38,3 @@ data/cache/
 # OS
 .DS_Store
 Thumbs.db
-venv/
-.env
-.env

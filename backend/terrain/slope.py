@@ -13,6 +13,9 @@ def calculate_slope_percent(
     out[~valid_mask] = mean_val
     gy, gx = np.gradient(out, resolution_m)
     slope_rad = np.arctan(np.sqrt(gx**2 + gy**2))
+    # The x/y gradients are only needed to form the final slope array.
+    del gx, gy
     slope_pct = np.tan(slope_rad) * 100.0
+    del slope_rad
     slope_pct[~valid_mask] = np.nan
     return slope_pct

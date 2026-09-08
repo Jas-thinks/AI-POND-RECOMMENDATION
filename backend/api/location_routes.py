@@ -1,5 +1,6 @@
 from pathlib import Path
 import uuid
+import logging
 from fastapi import APIRouter, Form, HTTPException
 from backend.schemas.response import AnalysisResponse
 from backend.services.analysis_service import analyze_contour_file
@@ -10,11 +11,13 @@ from backend.services.opentopography_service import fetch_dem_for_bounding_box
 BASE_DIR = Path(__file__).resolve().parents[2]
 GENERATED_DIR = BASE_DIR / "data" / "generated"
 
+logger = logging.getLogger("analysis.pipeline")
+
 router = APIRouter()
 
 
 @router.post("/analyzeLocation", response_model=AnalysisResponse)
-async def analyze_location(
+def analyze_location(
     location_name: str = Form(...),
     analysis_radius_m: float = Form(3000.0),
     contour_interval_m: float = Form(5.0),
@@ -152,8 +155,13 @@ async def analyze_location(
         return result
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - deliberate top-level guard
+        logger.exception(
+            "Unhandled error in /api/analyzeLocation for location '%s'",
+            location_name,
+        )
         raise HTTPException(
             status_code=500,
-            detail=f"Location analysis failed: {exc}",
+            detail="Location analysis failed. Please try again with a smaller "
+            "search radius or fewer candidates.",
         ) from exc

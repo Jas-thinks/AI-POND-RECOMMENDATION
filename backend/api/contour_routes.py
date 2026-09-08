@@ -1,12 +1,16 @@
+import logging
+
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from backend.schemas.response import AnalysisResponse
 from backend.services.analysis_service import analyze_contour_file
+
+logger = logging.getLogger("analysis.pipeline")
 
 router = APIRouter()
 
 
 @router.post("/analyzeContour", response_model=AnalysisResponse)
-async def analyze_contour(
+def analyze_contour(
     file: UploadFile = File(...),
     resolution_m: float = Form(10.0),
     max_candidates: int = Form(20),
@@ -52,7 +56,7 @@ async def analyze_contour(
             detail="max_pond_depth_m must be between 1 and 6 metres.",
         )
 
-    raw = await file.read()
+    raw = file.file.read()
     if not raw:
         raise HTTPException(
             status_code=400,
@@ -71,9 +75,19 @@ async def analyze_contour(
             max_pond_depth_m=max_pond_depth_m,
         )
     except ValueError as exc:
+        # Invalid user input: surface the validation message, do not leak
+        # internal details.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - deliberate top-level guard
+        # Unexpected server error: log the complete traceback server-side
+        # (never returned to the client) so the failure can be diagnosed,
+        # while responding with a safe, generic message.
+        logger.exception(
+            "Unhandled error in /api/analyzeContour for file '%s'",
+            file.filename,
+        )
         raise HTTPException(
             status_code=500,
-            detail=f"Terrain analysis failed: {exc}",
+            detail="Terrain analysis failed. Please try again with a smaller "
+            "area, a coarser resolution, or fewer candidates.",
         ) from exc

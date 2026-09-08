@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 from rasterio.features import shapes
@@ -94,6 +96,14 @@ from backend.terrain.slope import (
     calculate_slope_percent,
 )
 
+from backend.utils.timing import (
+    _emit as _emit_timing,
+)
+
+from backend.utils.timing import (
+    timed_stage,
+)
+
 
 # ---------------------------------------------------------
 # Convert catchment raster mask into GeoJSON
@@ -175,28 +185,45 @@ def analyze_contour_file(
 
     min_accumulation_percentile: float = 85.0,
 
+    detailed_catchment_count: int = 5,
+
+    max_cells: int | None = None,
+
+    max_dimension: int | None = None,
+
 ) -> dict:
+
+    _t_start = time.perf_counter()
+    _emit_timing("Starting contour analysis", 0.0)
 
     # =====================================================
     # STEP 1
     # Parse KML
     # =====================================================
 
-    parsed = parse_contour_file(
-        file_bytes,
-        filename,
-    )
+    with timed_stage("KML parsing"):
+        parsed = parse_contour_file(
+            file_bytes,
+            filename,
+        )
 
     # =====================================================
     # STEP 2
     # Contours → DEM
     # =====================================================
 
-    terrain = build_dem(
-        parsed,
-        resolution_m=
-            resolution_m,
-    )
+    with timed_stage("DEM generation"):
+        terrain = build_dem(
+            parsed,
+            resolution_m=
+                resolution_m,
+            max_cells=
+                max_cells if max_cells is not None
+                else 150_000,
+            max_dimension=
+                max_dimension if max_dimension is not None
+                else 1_500,
+        )
 
     original_dem = terrain.dem
 
@@ -205,50 +232,54 @@ def analyze_contour_file(
     # Fill artificial DEM sinks
     # =====================================================
 
-    filled_dem = (
-        fill_sinks_priority_flood(
-            original_dem,
-            terrain.valid_mask,
+    with timed_stage("Sink filling"):
+        filled_dem = (
+            fill_sinks_priority_flood(
+                original_dem,
+                terrain.valid_mask,
+            )
         )
-    )
 
     # =====================================================
     # STEP 4
     # Calculate slope
     # =====================================================
 
-    slope = (
-        calculate_slope_percent(
-            filled_dem,
-            terrain.valid_mask,
-            terrain.resolution_m,
+    with timed_stage("Slope calculation"):
+        slope = (
+            calculate_slope_percent(
+                filled_dem,
+                terrain.valid_mask,
+                terrain.resolution_m,
+            )
         )
-    )
 
     # =====================================================
     # STEP 5
     # D8 flow direction
     # =====================================================
 
-    direction = (
-        calculate_flow_direction(
-            filled_dem,
-            terrain.valid_mask,
-            terrain.resolution_m,
+    with timed_stage("Flow direction"):
+        direction = (
+            calculate_flow_direction(
+                filled_dem,
+                terrain.valid_mask,
+                terrain.resolution_m,
+            )
         )
-    )
 
     # =====================================================
     # STEP 6
     # Flow accumulation
     # =====================================================
 
-    accumulation = (
-        calculate_flow_accumulation(
-            direction,
-            terrain.valid_mask,
+    with timed_stage("Flow accumulation"):
+        accumulation = (
+            calculate_flow_accumulation(
+                direction,
+                terrain.valid_mask,
+            )
         )
-    )
 
     # =====================================================
     # STEP 7
@@ -298,33 +329,34 @@ def analyze_contour_file(
     # Find pond candidates ONLY on feature-clear land
     # =====================================================
 
-    candidate_cells = (
-        find_pond_candidates(
+    with timed_stage("Candidate selection"):
+        candidate_cells = (
+            find_pond_candidates(
 
-            filled_dem,
+                filled_dem,
 
-            slope,
+                slope,
 
-            accumulation,
+                accumulation,
 
-            # THIS IS THE IMPORTANT CHANGE
-            land_filter.free_land_mask,
+                # THIS IS THE IMPORTANT CHANGE
+                land_filter.free_land_mask,
 
-            terrain.resolution_m,
+                terrain.resolution_m,
 
-            max_candidates=
-                max_candidates,
+                max_candidates=
+                    max_candidates,
 
-            max_slope_percent=
-                max_candidate_slope_percent,
+                max_slope_percent=
+                    max_candidate_slope_percent,
 
-            min_candidate_spacing_m=
-                min_candidate_spacing_m,
+                min_candidate_spacing_m=
+                    min_candidate_spacing_m,
 
-            min_accumulation_percentile=
-                min_accumulation_percentile,
+                min_accumulation_percentile=
+                    min_accumulation_percentile,
+            )
         )
-    )
 
     if not candidate_cells:
 
@@ -347,16 +379,17 @@ def analyze_contour_file(
         boundary_wgs84.centroid.y
     )
 
-    rainfall = (
-        get_historical_rainfall(
+    with timed_stage("Rainfall"):
+        rainfall = (
+            get_historical_rainfall(
 
-            rain_latitude,
+                rain_latitude,
 
-            rain_longitude,
+                rain_longitude,
 
-            rainfall_years,
+                rainfall_years,
+            )
         )
-    )
 
     average_rainfall_mm = (
         rainfall.get(
@@ -374,298 +407,339 @@ def analyze_contour_file(
 
     recommended_catchment_geojson = None
 
-    for rank, cell in enumerate(
-        candidate_cells,
-        start=1,
-    ):
+    with timed_stage("Candidate evaluation"):
 
-        row = cell.row
-        column = cell.col
+        for rank, cell in enumerate(
+                candidate_cells,
+                start=1,
+            ):
+    
+            row = cell.row
+            column = cell.col
+    
+            # -------------------------------------------------
+            # Catchment
+            #
+            # IMPORTANT (Render-safety optimisation):
+            # Full BFS catchment raster delineation is expensive
+            # and duplicates work already captured by the D8 flow
+            # accumulation grid. A cell's ``accumulation`` value is
+            # exactly the number of upstream cells draining to it,
+            # i.e. its catchment cell count.
+            #
+            # We therefore run the detailed mask-based delineation
+            # for only the highest-ranked ``detailed_catchment_count``
+            # candidates (used to build the recommended catchment
+            # geometry) and derive the catchment cell count / area
+            # from flow accumulation for the remainder. Candidate
+            # ranking, scoring and the per-candidate ``catchment``
+            # summary structure are completely unchanged.
+            # -------------------------------------------------
+    
+            if rank <= max(1, min(int(detailed_catchment_count), len(candidate_cells))):
+    
+                catchment_mask = (
+                    delineate_catchment(
+    
+                        direction,
+    
+                        terrain.valid_mask,
+    
+                        row,
+    
+                        column,
+                    )
+                )
+    
+                cell_count = int(
+                    catchment_mask.sum()
+                )
 
-        # -------------------------------------------------
-        # Catchment
-        # -------------------------------------------------
-
-        catchment_mask = (
-            delineate_catchment(
-
-                direction,
-
-                terrain.valid_mask,
-
-                row,
-
-                column,
-            )
-        )
-
-        cell_count = int(
-            catchment_mask.sum()
-        )
-
-        area_m2 = float(
-
-            cell_count
-
-            * terrain.resolution_m
-
-            * terrain.resolution_m
-        )
-
-        # -------------------------------------------------
-        # Grid → longitude / latitude
-        # -------------------------------------------------
-
-        x = float(
-            terrain.xs[column]
-        )
-
-        y = float(
-            terrain.ys[row]
-        )
-
-        longitude, latitude = (
-            terrain.to_wgs84.transform(
-                x,
-                y,
-            )
-        )
-
-        # -------------------------------------------------
-        # Water storage + runoff
-        #
-        # IMPORTANT:
-        # Use free land mask while estimating pond
-        # footprint.
-        # -------------------------------------------------
-
-        water = (
-            estimate_candidate_water_metrics(
-
-                row,
-
-                column,
-
-                filled_dem,
-
-                slope,
-
-                land_filter.free_land_mask,
-
-                terrain.resolution_m,
-
-                area_m2,
-
-                average_rainfall_mm,
-
-                runoff_coefficient=
-                    runoff_coefficient,
-
-                pond_radius_m=
-                    pond_radius_m,
-
-                max_pond_depth_m=
-                    max_pond_depth_m,
-            )
-        )
-
-        candidate_id = rank
-
-        candidates.append(
-            {
-
-                "candidate_id":
-                    candidate_id,
-
-                "rank":
-                    rank,
-
-                "latitude":
-                    float(latitude),
-
-                "longitude":
-                    float(longitude),
-
-                "elevation_m":
+                # Keep the array only for the top-ranked candidate which is
+                # turned into the recommended catchment GeoJSON; free detailed
+                # masks immediately after counting to limit peak memory.
+                if rank != 1:
+                    del catchment_mask
+            else:
+    
+                # Cheap source: upstream contributing-cell count.
+                catchment_mask = None
+    
+                cell_count = int(
                     round(
                         float(
-                            filled_dem[
+                            accumulation[
                                 row,
                                 column,
                             ]
-                        ),
-                        3,
-                    ),
-
-                "slope_percent":
-                    round(
-                        float(
-                            slope[
-                                row,
-                                column,
-                            ]
-                        ),
-                        3,
-                    ),
-
-                "flow_accumulation_cells":
-                    int(
+                        )
+                    )
+                )
+    
+            area_m2 = float(
+    
+                cell_count
+    
+                * terrain.resolution_m
+    
+                * terrain.resolution_m
+            )
+    
+            # -------------------------------------------------
+            # Grid → longitude / latitude
+            # -------------------------------------------------
+    
+            x = float(
+                terrain.xs[column]
+            )
+    
+            y = float(
+                terrain.ys[row]
+            )
+    
+            longitude, latitude = (
+                terrain.to_wgs84.transform(
+                    x,
+                    y,
+                )
+            )
+    
+            # -------------------------------------------------
+            # Water storage + runoff
+            #
+            # IMPORTANT:
+            # Use free land mask while estimating pond
+            # footprint.
+            # -------------------------------------------------
+    
+            water = (
+                estimate_candidate_water_metrics(
+    
+                    row,
+    
+                    column,
+    
+                    filled_dem,
+    
+                    slope,
+    
+                    land_filter.free_land_mask,
+    
+                    terrain.resolution_m,
+    
+                    area_m2,
+    
+                    average_rainfall_mm,
+    
+                    runoff_coefficient=
+                        runoff_coefficient,
+    
+                    pond_radius_m=
+                        pond_radius_m,
+    
+                    max_pond_depth_m=
+                        max_pond_depth_m,
+                )
+            )
+    
+            candidate_id = rank
+    
+            candidates.append(
+                {
+    
+                    "candidate_id":
+                        candidate_id,
+    
+                    "rank":
+                        rank,
+    
+                    "latitude":
+                        float(latitude),
+    
+                    "longitude":
+                        float(longitude),
+    
+                    "elevation_m":
                         round(
                             float(
-                                accumulation[
+                                filled_dem[
                                     row,
                                     column,
                                 ]
-                            )
-                        )
-                    ),
-
-                "suitability_score":
-                    round(
-                        float(
-                            cell.score
+                            ),
+                            3,
                         ),
-                        2,
-                    ),
-
-                "catchment": {
-
-                    "cell_count":
-                        cell_count,
-
-                    "area_m2":
+    
+                    "slope_percent":
                         round(
-                            area_m2,
+                            float(
+                                slope[
+                                    row,
+                                    column,
+                                ]
+                            ),
+                            3,
+                        ),
+    
+                    "flow_accumulation_cells":
+                        int(
+                            round(
+                                float(
+                                    accumulation[
+                                        row,
+                                        column,
+                                    ]
+                                )
+                            )
+                        ),
+    
+                    "suitability_score":
+                        round(
+                            float(
+                                cell.score
+                            ),
                             2,
                         ),
-
-                    "area_hectares":
-                        round(
-                            area_m2
-                            / 10_000.0,
-                            4,
-                        ),
-                },
-
-                "water":
-                    water,
-
-                "land_status": (
-                    "Feature-clear according to "
-                    "OpenStreetMap: candidate footprint "
-                    "does not overlap mapped water/"
-                    "waterways, roads or buildings. "
-                    "Legal ownership still requires "
-                    "official verification."
-                ),
-            }
-        )
-
-        # Only show top candidate catchment for now
-        # to avoid filling entire map with many polygons.
-
-        if rank == 1:
-
-            recommended_catchment_geojson = (
-                _mask_to_geojson(
-
-                    catchment_mask,
-
-                    terrain.transform,
-
-                    terrain.to_wgs84,
-                )
+    
+                    "catchment": {
+    
+                        "cell_count":
+                            cell_count,
+    
+                        "area_m2":
+                            round(
+                                area_m2,
+                                2,
+                            ),
+    
+                        "area_hectares":
+                            round(
+                                area_m2
+                                / 10_000.0,
+                                4,
+                            ),
+                    },
+    
+                    "water":
+                        water,
+    
+                    "land_status": (
+                        "Feature-clear according to "
+                        "OpenStreetMap: candidate footprint "
+                        "does not overlap mapped water/"
+                        "waterways, roads or buildings. "
+                        "Legal ownership still requires "
+                        "official verification."
+                    ),
+                }
             )
+    
+            # Only show top candidate catchment for now
+            # to avoid filling entire map with many polygons.
+    
+            if rank == 1 and catchment_mask is not None:
+    
+                recommended_catchment_geojson = (
+                    _mask_to_geojson(
+    
+                        catchment_mask,
+    
+                        terrain.transform,
+    
+                        terrain.to_wgs84,
+                    )
+                )
 
-    # =====================================================
-    # =====================================================
-    # STEP 12
-    # Multi-factor environmental analysis
-    # =====================================================
-
-    # Get centroid for regional data lookups
-    region_lat = boundary_wgs84.centroid.y
-    region_lon = boundary_wgs84.centroid.x
-
-    # Soil analysis
-    soil_analysis = get_soil_data(region_lat, region_lon)
-
-    # Climate / rainfall analysis
-    climate_analysis = get_climate_analysis(region_lat, region_lon, rainfall_years)
-
-    # Land-use analysis around recommended candidate
-    if candidates:
-        best = candidates[0]
-        land_use_analysis = get_landuse_analysis(
-            best["latitude"],
-            best["longitude"],
-            radius_m=1500.0,
-        )
-    else:
-        land_use_analysis = get_landuse_analysis(region_lat, region_lon, radius_m=1500.0)
-
-    # Per-candidate multi-factor scoring
-    mf_candidates = []
-    for cand in candidates:
-        catchment_area = cand.get("catchment", {}).get("area_m2", 0)
-
-        # Water availability
-        water_avail = estimate_water_availability(
-            catchment_area_m2=catchment_area,
-            annual_rainfall_mm=average_rainfall_mm,
-            runoff_coefficient=runoff_coefficient,
-            land_cover_type=land_use_analysis.get("dominant_land_use"),
-            soil_permeability=soil_analysis.get("permeability"),
-        )
-
-        # Accessibility
-        accessibility = get_accessibility_analysis(nearest_road_distance_m=None)
-
-        # Storage estimation
-        storage = estimate_storage(
-            surface_area_m2=cand.get("water", {}).get("pond_area_m2"),
-            max_depth_m=max_pond_depth_m,
-        )
-
-        # Constraints
-        constraints = evaluate_constraints(
-            land_filter_result=land_filter.__dict__,
-            land_use_restrictions=land_use_analysis.get("restrictions"),
-        )
-
-        # Multi-factor score
-        mf_score = score_candidate(
-            candidate=cand,
-            soil_analysis=soil_analysis,
-            rainfall_analysis=climate_analysis,
-            water_availability=water_avail,
-            land_use_analysis=land_use_analysis,
-            accessibility_analysis=accessibility,
-        )
-
-        mf_candidates.append({
-            **cand,
-            "soil_analysis": soil_analysis,
-            "climate_analysis": climate_analysis,
-            "water_availability": water_avail,
-            "land_use_analysis": land_use_analysis,
-            "accessibility_analysis": accessibility,
-            "environmental_constraints": constraints,
-            "storage_estimation": storage,
-            "multi_factor_score": mf_score,
-        })
-
-    candidates = mf_candidates
-
-    # Data confidence assessment
-    data_confidence = assess_confidence(
-        dem_available=True,
-        hydrology_available=True,
-        rainfall_available=climate_analysis.get("available"),
-        soil_available=soil_analysis.get("available"),
-        land_use_available=land_use_analysis.get("available"),
-        osm_available=True,
-        storage_available=True,
+    with timed_stage("Multi-factor analysis"):
+        # =====================================================
+        # =====================================================
+        # STEP 12
+        # Multi-factor environmental analysis
+        # =====================================================
+    
+        # Get centroid for regional data lookups
+        region_lat = boundary_wgs84.centroid.y
+        region_lon = boundary_wgs84.centroid.x
+    
+        # Soil analysis
+        soil_analysis = get_soil_data(region_lat, region_lon)
+    
+        # Climate / rainfall analysis
+        climate_analysis = get_climate_analysis(region_lat, region_lon, rainfall_years)
+    
+        # Land-use analysis around recommended candidate
+        if candidates:
+            best = candidates[0]
+            land_use_analysis = get_landuse_analysis(
+                best["latitude"],
+                best["longitude"],
+                radius_m=1500.0,
+            )
+        else:
+            land_use_analysis = get_landuse_analysis(region_lat, region_lon, radius_m=1500.0)
+    
+        # Per-candidate multi-factor scoring
+        mf_candidates = []
+        for cand in candidates:
+            catchment_area = cand.get("catchment", {}).get("area_m2", 0)
+    
+            # Water availability
+            water_avail = estimate_water_availability(
+                catchment_area_m2=catchment_area,
+                annual_rainfall_mm=average_rainfall_mm,
+                runoff_coefficient=runoff_coefficient,
+                land_cover_type=land_use_analysis.get("dominant_land_use"),
+                soil_permeability=soil_analysis.get("permeability"),
+            )
+    
+            # Accessibility
+            accessibility = get_accessibility_analysis(nearest_road_distance_m=None)
+    
+            # Storage estimation
+            storage = estimate_storage(
+                surface_area_m2=cand.get("water", {}).get("pond_area_m2"),
+                max_depth_m=max_pond_depth_m,
+            )
+    
+            # Constraints
+            constraints = evaluate_constraints(
+                land_filter_result=land_filter.__dict__,
+                land_use_restrictions=land_use_analysis.get("restrictions"),
+            )
+    
+            # Multi-factor score
+            mf_score = score_candidate(
+                candidate=cand,
+                soil_analysis=soil_analysis,
+                rainfall_analysis=climate_analysis,
+                water_availability=water_avail,
+                land_use_analysis=land_use_analysis,
+                accessibility_analysis=accessibility,
+            )
+    
+            mf_candidates.append({
+                **cand,
+                "soil_analysis": soil_analysis,
+                "climate_analysis": climate_analysis,
+                "water_availability": water_avail,
+                "land_use_analysis": land_use_analysis,
+                "accessibility_analysis": accessibility,
+                "environmental_constraints": constraints,
+                "storage_estimation": storage,
+                "multi_factor_score": mf_score,
+            })
+    
+        candidates = mf_candidates
+    
+        # Data confidence assessment
+        data_confidence = assess_confidence(
+            dem_available=True,
+            hydrology_available=True,
+            rainfall_available=climate_analysis.get("available"),
+            soil_available=soil_analysis.get("available"),
+            land_use_available=land_use_analysis.get("available"),
+            osm_available=True,
+            storage_available=True,
     )
 
     # =====================================================
@@ -746,7 +820,9 @@ def analyze_contour_file(
     # FINAL JSON RESPONSE
     # =====================================================
 
-    return {
+    _emit_timing("Total", time.perf_counter() - _t_start)
+
+    _result = {
 
         "status":
             "success",
@@ -1065,3 +1141,5 @@ def analyze_contour_file(
             ),
         ],
     }
+
+    return _result
