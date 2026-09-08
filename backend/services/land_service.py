@@ -41,6 +41,63 @@ OVERPASS_ENDPOINTS = (
 
 
 # ---------------------------------------------------------
+# Configurable safety buffer distances
+# ---------------------------------------------------------
+
+@dataclass(frozen=True)
+class BufferConfig:
+    """
+    Safety buffers (metres) applied as HARD exclusions around
+    prohibited OSM features.
+
+    All values are additive to the proposed pond radius so the
+    entire estimated pond footprint stays clear of the feature,
+    not just the candidate centre point.
+
+    Attributes
+    ----------
+    water_m : float
+        Additional buffer around water polygons (natural=water,
+        water=*, landuse=reservoir/basin/pond/lake, wetland, ...).
+    waterway_m : float
+        Additional buffer around linear waterways (river, stream,
+        canal, drain, ditch, watercourse). Applied on top of an
+        estimated half-width per waterway type.
+    road_m : float
+        Additional buffer around roads/highways (centre lines).
+    building_m : float
+        Additional buffer around buildings.
+    """
+
+    water_m: float = 10.0
+    waterway_m: float = 10.0
+    road_m: float = 8.0
+    building_m: float = 5.0
+
+    # Approximate half-width (metres) for linear waterways where
+    # OSM provides only a centre line.
+    waterway_half_width_m: dict = None
+
+    def resolved_waterway_half_width(self, waterway_type: str) -> float:
+        if self.waterway_half_width_m is not None:
+            return self.waterway_half_width_m.get(waterway_type, 5.0)
+        return {
+            "river": 20.0,
+            "canal": 8.0,
+            "stream": 4.0,
+            "drain": 3.0,
+            "ditch": 2.0,
+            "watercourse": 12.0,
+        }.get(waterway_type, 5.0)
+
+
+# Default safety buffers inferred from existing conservative project
+# constants (pond footprint + fixed safety buffer behaviour already in
+# use). They remain overridable via status-style wrapper params.
+DEFAULT_BUFFER_CONFIG = BufferConfig()
+
+
+# ---------------------------------------------------------
 # Result object
 # ---------------------------------------------------------
 
@@ -59,6 +116,15 @@ class LandFilterResult:
     free_cell_count: int
 
     notes: list[str]
+
+    # Per-category excluded-cell counts (diagnostics)
+    excluded_water_cells: int = 0
+    excluded_waterway_cells: int = 0
+    excluded_road_cells: int = 0
+    excluded_building_cells: int = 0
+
+    # Flags the safety state so consumers can fail safely.
+    osm_data_available: bool = True
 
 
 # ---------------------------------------------------------
@@ -86,15 +152,25 @@ def _category(tags: dict) -> str | None:
     if tags.get("natural") in {
         "water",
         "wetland",
+        "bay",
+        "strait",
+        "spring",
+        "waterfall",
     }:
         return "water"
 
     if tags.get("landuse") in {
         "reservoir",
         "basin",
+        "pond",
+        "lake",
+        "salt_pond",
+        "fishpond",
+        "aquaculture",
     }:
         return "water"
 
+    # Covers water=*, water=river/basin/lake/pond/oxbow/...
     if tags.get("water"):
         return "water"
 
@@ -107,6 +183,7 @@ def _category(tags: dict) -> str | None:
         "canal",
         "drain",
         "ditch",
+        "watercourse",
     }:
         return "waterway"
 
@@ -321,8 +398,8 @@ def _download_osm_elements(
   way["natural"="water"]({bbox});
   relation["natural"="water"]({bbox});
 
-  way["natural"="wetland"]({bbox});
-  relation["natural"="wetland"]({bbox});
+  way["natural"~"^(wetland|bay|strait|spring|waterfall)$"]({bbox});
+  relation["natural"~"^(wetland|bay|strait|spring|waterfall)$"]({bbox});
 
   way["water"]({bbox});
   relation["water"]({bbox});
@@ -330,10 +407,10 @@ def _download_osm_elements(
   way["waterway"="riverbank"]({bbox});
   relation["waterway"="riverbank"]({bbox});
 
-  way["waterway"~"^(river|stream|canal|drain|ditch)$"]({bbox});
+  way["waterway"~"^(river|stream|canal|drain|ditch|watercourse)$"]({bbox});
 
-  way["landuse"~"^(reservoir|basin)$"]({bbox});
-  relation["landuse"~"^(reservoir|basin)$"]({bbox});
+  way["landuse"~"^(reservoir|basin|pond|lake|salt_pond|fishpond|aquaculture)$"]({bbox});
+  relation["landuse"~"^(reservoir|basin|pond|lake|salt_pond|fishpond|aquaculture)$"]({bbox});
 
   way["building"]({bbox});
 
@@ -447,6 +524,7 @@ def _project_and_buffer(
     to_projected,
     pond_radius_m: float,
     safety_buffer_m: float,
+    buffer_config: BufferConfig | None = None,
 ):
 
     # Convert latitude/longitude to metre coordinates
@@ -467,11 +545,17 @@ def _project_and_buffer(
     # We keep the ENTIRE estimated pond footprint away.
     # -----------------------------------------------------
 
+    if buffer_config is None:
+        buffer_config = DEFAULT_BUFFER_CONFIG
+
     if category == "water":
 
         distance = (
             pond_radius_m
-            + safety_buffer_m
+            + max(
+                safety_buffer_m,
+                buffer_config.water_m,
+            )
         )
 
     elif category == "building":
@@ -481,6 +565,7 @@ def _project_and_buffer(
             + max(
                 5.0,
                 safety_buffer_m,
+                buffer_config.building_m,
             )
         )
 
@@ -494,6 +579,7 @@ def _project_and_buffer(
             + max(
                 6.0,
                 safety_buffer_m,
+                buffer_config.road_m,
             )
         )
 
@@ -505,27 +591,18 @@ def _project_and_buffer(
 
         # Approximate half-width where OSM gives
         # only the river/stream centre line.
-
-        half_width = {
-
-            "river": 20.0,
-
-            "canal": 8.0,
-
-            "stream": 4.0,
-
-            "drain": 3.0,
-
-            "ditch": 2.0,
-
-        }.get(
-            waterway_type,
-            5.0,
+        half_width = (
+            buffer_config.resolved_waterway_half_width(
+                waterway_type
+            )
         )
 
         distance = (
             pond_radius_m
-            + safety_buffer_m
+            + max(
+                safety_buffer_m,
+                buffer_config.waterway_m,
+            )
             + half_width
         )
 
@@ -550,6 +627,7 @@ def build_osm_free_land_mask(
     boundary_wgs84,
     pond_radius_m: float,
     safety_buffer_m: float = 10.0,
+    buffer_config: BufferConfig | None = None,
 ) -> LandFilterResult:
 
     """
@@ -576,9 +654,15 @@ def build_osm_free_land_mask(
         public land
     """
 
-    # -----------------------------------------------------
-    # Download OpenStreetMap features
-    # -----------------------------------------------------
+    # ---------------------------------------------------------
+    # Hard exclusions are REQUIRED for safety.
+    #
+    # If OpenStreetMap data cannot be retrieved, we must NOT
+    # silently treat every valid DEM cell as buildable - doing
+    # so would let pond candidates be recommended on top of an
+    # unmapped river, road or building. Instead we fail safely
+    # and let the caller decide how to degrade.
+    # ---------------------------------------------------------
 
     try:
         elements, endpoint = (
@@ -587,36 +671,18 @@ def build_osm_free_land_mask(
             )
         )
     except Exception as exc:
-        # Graceful degradation: when Overpass API is unreachable
-        # we cannot apply feature filtering. Return a "no filter"
-        # result where all valid cells are considered free, but
-        # record a clear note so the system remains usable for
-        # planning purposes and the failure is visible to users.
-        import numpy as _np
-        full_mask = _np.ones(
-            terrain.valid_mask.shape,
-            dtype=bool,
-        )
-        return LandFilterResult(
-            free_land_mask=full_mask,
-            exclusion_geojson=None,
-            source="OSM filter unavailable (Overpass API down)",
-            feature_counts={
-                "water": 0,
-                "waterway": 0,
-                "road": 0,
-                "building": 0,
-            },
-            excluded_cell_count=0,
-            free_cell_count=int(terrain.valid_mask.sum()),
-            notes=[
-                "OpenStreetMap land-filter could not be applied: "
-                + str(exc)[:200],
-                "All valid DEM cells were treated as buildable. "
-                "Field verification still required for rivers, "
-                "roads and buildings.",
-            ],
-        )
+        raise RuntimeError(
+            "OpenStreetMap/Overpass land-data query failed and no "
+            "cached land data exists, so hard exclusions (rivers, "
+            "water, roads, buildings) cannot be enforced. To avoid "
+            "recommending a pond on an excluded feature the analysis "
+            "fails safely instead of assuming all DEM cells are "
+            "buildable. "
+            f"Last error: {exc}"
+        ) from exc
+
+    if buffer_config is None:
+        buffer_config = DEFAULT_BUFFER_CONFIG
 
     feature_counts = {
 
@@ -630,10 +696,11 @@ def build_osm_free_land_mask(
     }
 
     buffered_geometries = []
+    buffered_by_category = {k: [] for k in ("water", "waterway", "road", "building")}
 
-    # -----------------------------------------------------
+    # ---------------------------------------------------------
     # Convert every OSM object into an exclusion polygon
-    # -----------------------------------------------------
+    # ---------------------------------------------------------
 
     for element in elements:
 
@@ -690,6 +757,8 @@ def build_osm_free_land_mask(
                 pond_radius_m,
             safety_buffer_m=
                 safety_buffer_m,
+            buffer_config=
+                buffer_config,
         )
 
         if (
@@ -711,6 +780,12 @@ def build_osm_free_land_mask(
             continue
 
         buffered_geometries.append(
+            clipped
+        )
+
+        buffered_by_category[
+            category
+        ].append(
             clipped
         )
 
@@ -760,6 +835,30 @@ def build_osm_free_land_mask(
                 dtype=bool,
             )
         )
+
+    # ---------------------------------------------------------
+    # Per-category excluded-cell counts (diagnostics)
+    # ---------------------------------------------------------
+
+    def _count_category_mask(category_name: str) -> int:
+        polys = buffered_by_category.get(category_name, [])
+        if not polys:
+            return 0
+        union = unary_union(polys)
+        m = geometry_mask(
+            [mapping(union)],
+            out_shape=terrain.valid_mask.shape,
+            transform=terrain.transform,
+            invert=True,
+            all_touched=True,
+        )
+        return int((terrain.valid_mask & m).sum())
+
+    excluded_water_cells = _count_category_mask("water")
+    excluded_waterway_cells = _count_category_mask("waterway")
+    excluded_road_cells = _count_category_mask("road")
+    excluded_building_cells = _count_category_mask("building")
+
 
     # -----------------------------------------------------
     # FREE LAND =
@@ -848,4 +947,17 @@ def build_osm_free_land_mask(
                 "availability or legal permission."
             ),
         ],
+
+        excluded_water_cells=
+            excluded_water_cells,
+
+        excluded_waterway_cells=
+            excluded_waterway_cells,
+
+        excluded_road_cells=
+            excluded_road_cells,
+
+        excluded_building_cells=
+            excluded_building_cells,
+
     )

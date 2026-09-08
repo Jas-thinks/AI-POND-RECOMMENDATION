@@ -39,11 +39,13 @@ class TerrainGrid:
     def to_projected(self) -> Transformer:
         """Return the transformer to projected (UTM) coordinates.
 
-        Note: In this codebase the ``to_wgs84`` transformer converts from UTM
-        to WGS84, so ``to_projected`` aliases it for compatibility with
-        callers that expect a ``to_projected`` attribute.
+        OSM geometry is supplied in WGS84 (lon/lat), while the DEM raster
+        and the analysis grid live in projected UTM metres. To convert OSM
+        features into the same frame as the DEM we must apply the
+        WGS84 -> UTM transform (``from_wgs84``). Aliasing it as
+        ``to_projected`` keeps the call sites stable.
         """
-        return self.to_wgs84
+        return self.from_wgs84
 
 
 def _utm_crs(lon: float, lat: float) -> CRS:

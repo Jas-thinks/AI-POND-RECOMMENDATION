@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
 from rasterio.features import shapes
+
+from scipy.ndimage import binary_dilation
 
 from shapely.geometry import (
     mapping,
@@ -45,7 +48,9 @@ from backend.services.kml_service import (
 )
 
 from backend.services.land_service import (
+    BufferConfig,
     build_osm_free_land_mask,
+    DEFAULT_BUFFER_CONFIG,
 )
 
 from backend.services.rainfall_service import (
@@ -103,6 +108,142 @@ from backend.utils.timing import (
 from backend.utils.timing import (
     timed_stage,
 )
+
+
+# ---------------------------------------------------------
+# DEM-derived hydrology safety configuration
+# ---------------------------------------------------------
+
+@dataclass(frozen=True)
+class HydrologySafetyConfig:
+    """
+    Dem-derived safety exclusions derived from the D8 flow
+    accumulation grid.
+
+    OSM is not guaranteed to contain every small stream. The DEM
+    flow-accumulation grid reveals strong/obvious drainage channels
+    that are treated as hard exclusion corridors.
+
+    Attributes
+    ----------
+    enabled : bool
+        Whether to apply the DEM-derived hydrology safety mask.
+    accumulation_percentile : float
+        Percentile (0-100) of non-zero flow accumulation used as the
+        channel threshold. Cells at or above this percentile are
+        treated as drainage channels and excluded.
+    buffer_m : float
+        Extra radius (metres) applied around detected channels.
+    """
+
+    enabled: bool = True
+    accumulation_percentile: float = 95.0
+    buffer_m: float = 10.0
+
+
+def build_hydrology_safety_mask(
+    accumulation: np.ndarray,
+    valid_mask: np.ndarray,
+    resolution_m: float,
+    config: HydrologySafetyConfig | None = None,
+) -> np.ndarray:
+    """
+    Build a boolean mask of DEM-derived drainage channels (streams,
+    river corridors) to be treated as HARD exclusions.
+
+    A cell contributes to a channel when its flow accumulation is at
+    or above a configurable percentile of the non-zero accumulation
+    distribution, dilated by an optional buffer / pond footprint so
+    the entire proposed pond stays out of the channel corridor.
+    """
+    if config is None:
+        config = HydrologySafetyConfig()
+
+    if not config.enabled:
+        return np.zeros_like(valid_mask, dtype=bool)
+
+    channel_mask = np.zeros_like(valid_mask, dtype=bool)
+
+    acc_nonzero = accumulation[valid_mask & np.isfinite(accumulation) & (accumulation > 0)]
+    if acc_nonzero.size == 0:
+        return channel_mask
+
+    threshold = float(np.nanpercentile(acc_nonzero, config.accumulation_percentile))
+    channel_mask = (
+        valid_mask
+        & np.isfinite(accumulation)
+        & (accumulation >= threshold)
+    )
+
+    if not channel_mask.any():
+        return channel_mask
+
+    # Dilate channel cores into a conservative exclusion corridor that
+    # also covers the proposed pond footprint radius.
+    radius_cells = max(1, int(round(config.buffer_m / resolution_m)))
+    if radius_cells > 1:
+        channel_mask = binary_dilation(
+            channel_mask,
+            iterations=radius_cells,
+            border_value=0,
+        )
+        channel_mask &= valid_mask
+
+    return channel_mask
+
+
+# ---------------------------------------------------------
+# Candidate footprint validation
+# ---------------------------------------------------------
+
+def candidate_footprint_in_buildable_mask(
+    row: int,
+    col: int,
+    pond_radius_m: float,
+    resolution_m: float,
+    buildable_mask: np.ndarray,
+) -> bool:
+    """
+    Verify that the full circular footprint of a proposed pond is
+    contained inside the buildable (allowed) mask.
+
+    This is stricter than testing only the candidate centre point:
+    it guarantees the candidate does not overlap a mapped river/road/
+    building/water feature nor any DEM-derived drainage channel.
+
+    Parameters
+    ----------
+    row, col : int
+        Candidate grid coordinates.
+    pond_radius_m : float
+        Proposed pond radius (metres).
+    resolution_m : float
+        DEM grid resolution (metres per cell).
+    buildable_mask : np.ndarray
+        The single authoritative allowed-land mask (valid DEM AND OSM
+        free land AND hydrology-safe).
+
+    Returns
+    -------
+    bool
+        True only if the entire circular footprint is buildable.
+    """
+    rows, cols = buildable_mask.shape
+    radius_cells = max(1, int(np.ceil(pond_radius_m / resolution_m)))
+
+    r0 = max(0, row - radius_cells)
+    r1 = min(rows, row + radius_cells + 1)
+    c0 = max(0, col - radius_cells)
+    c1 = min(cols, col + radius_cells + 1)
+
+    rr, cc = np.ogrid[r0:r1, c0:c1]
+    distance_m = np.sqrt((rr - row) ** 2 + (cc - col) ** 2) * resolution_m
+
+    in_disk = distance_m <= pond_radius_m
+    window = buildable_mask[r0:r1, c0:c1]
+
+    # All cells inside the pond disk must be buildable.
+    return bool(np.all(window[in_disk]))
 
 
 # ---------------------------------------------------------
@@ -190,6 +331,10 @@ def analyze_contour_file(
     max_cells: int | None = None,
 
     max_dimension: int | None = None,
+
+    buffer_config: BufferConfig | None = None,
+
+    hydrology_safety: HydrologySafetyConfig | None = None,
 
 ) -> dict:
 
@@ -295,76 +440,137 @@ def analyze_contour_file(
 
     # =====================================================
     # STEP 8
-    # LAND FILTER
+    # HARD EXCLUSION MASKS
     #
-    # Exclude:
-    # rivers
-    # water
-    # roads
-    # buildings
+    # Build a single authoritative "buildable/allowed-land" mask:
     #
-    # IMPORTANT:
-    # We do this AFTER hydrology.
+    #   buildable = valid DEM
+    #               AND OSM free land (no water / waterway / road / building)
+    #               AND hydrology-safe land (no DEM-derived drainage
+    #                                         channel corridor)
     #
-    # Rivers must still take part in flow calculations.
+    # Hard exclusion is applied BEFORE any scoring so a candidate on a
+    # river, water body, road or building can never reach the final
+    # recommendations.
     # =====================================================
 
-    land_filter = (
-        build_osm_free_land_mask(
-
-            terrain,
-
-            boundary_wgs84,
-
-            pond_radius_m=
-                pond_radius_m,
-
-            safety_buffer_m=
-                10.0,
+    try:
+        land_filter = (
+            build_osm_free_land_mask(
+                terrain,
+                boundary_wgs84,
+                pond_radius_m=
+                    pond_radius_m,
+                safety_buffer_m=
+                    10.0,
+                buffer_config=
+                    buffer_config,
+            )
         )
+    except RuntimeError as exc:
+        # Fail safely: we must NOT pretend all DEM cells are buildable
+        # when OSM exclusion data is unavailable.
+        _emit_timing("Total (failed)", time.perf_counter() - _t_start)
+        raise ValueError(str(exc)) from exc
+
+    if buffer_config is None:
+        buffer_config = DEFAULT_BUFFER_CONFIG
+
+    if hydrology_safety is None:
+        hydrology_safety = HydrologySafetyConfig()
+
+    # DEM-derived drainage channels (streams, river corridors) are
+    # treated as hard exclusions: OSM does not always contain them.
+    with timed_stage("Hydrology safety mask"):
+        hydrology_excluded_mask = (
+            build_hydrology_safety_mask(
+                accumulation,
+                terrain.valid_mask,
+                terrain.resolution_m,
+                hydrology_safety,
+            )
+        )
+
+    # ---- Authoritative buildable mask ---------------------
+    buildable_mask = (
+        land_filter.free_land_mask
+        & ~hydrology_excluded_mask
     )
+
+    if not buildable_mask.any():
+        raise ValueError(
+            "Hard land/hydrology constraints removed the entire "
+            "analysis area. No buildable pond location remains."
+        )
 
     # =====================================================
     # STEP 9
-    # Find pond candidates ONLY on feature-clear land
+    # Find pond candidates ONLY within the authoritative
+    # buildable mask
     # =====================================================
 
     with timed_stage("Candidate selection"):
         candidate_cells = (
             find_pond_candidates(
-
                 filled_dem,
-
                 slope,
-
                 accumulation,
-
-                # THIS IS THE IMPORTANT CHANGE
-                land_filter.free_land_mask,
-
+                buildable_mask,
                 terrain.resolution_m,
-
                 max_candidates=
                     max_candidates,
-
                 max_slope_percent=
                     max_candidate_slope_percent,
-
                 min_candidate_spacing_m=
                     min_candidate_spacing_m,
-
                 min_accumulation_percentile=
                     min_accumulation_percentile,
             )
         )
 
     if not candidate_cells:
-
         raise ValueError(
             "No pond candidates remain after "
             "excluding mapped rivers/water bodies, "
+            "DEM-derived drainage channels, "
             "roads and buildings."
         )
+
+    initial_candidate_count = len(candidate_cells)
+
+    # =====================================================
+    # STEP 9.5
+    # CANDIDATE FOOTPRINT VALIDATION
+    #
+    # A candidate is a real pond footprint, not a point. Before it is
+    # accepted, verify that the whole proposed footprint is inside the
+    # buildable mask (not merely its centre point).
+    # =====================================================
+
+    before_footprint = len(candidate_cells)
+    footprint_valid_candidates = []
+    for c in candidate_cells:
+        if candidate_footprint_in_buildable_mask(
+            c.row,
+            c.col,
+            pond_radius_m,
+            terrain.resolution_m,
+            buildable_mask,
+        ):
+            footprint_valid_candidates.append(c)
+
+    rejected_by_footprint = before_footprint - len(footprint_valid_candidates)
+
+    if not footprint_valid_candidates:
+        raise ValueError(
+            "All candidate pond footprints overlap a hard-excluded "
+            "feature (river, water body, road, building or drainage "
+            "channel) after applying safety buffers. No valid location "
+            "remains; try a smaller pond radius or a different area."
+        )
+
+    candidate_cells = footprint_valid_candidates
+    del footprint_valid_candidates, before_footprint
 
     # =====================================================
     # STEP 10
@@ -416,7 +622,35 @@ def analyze_contour_file(
     
             row = cell.row
             column = cell.col
-    
+
+            # -------------------------------------------------
+            # FINAL HARD VALIDATION
+            #
+            # Belt-and-braces: a candidate must not be inside DEM
+            # exclusion, inside buildable (OSM) land, or inside the
+            # hydrology safety mask. This re-checks the full pond
+            # footprint (not just the centre) so that no candidate
+            # with a hard-exclusion violation is ever reported, even
+            # if it received a high score.
+            # -------------------------------------------------
+
+            if (
+                not buildable_mask[row, column]
+                or not candidate_footprint_in_buildable_mask(
+                    row,
+                    column,
+                    pond_radius_m,
+                    terrain.resolution_m,
+                    buildable_mask,
+                )
+            ):
+                raise ValueError(
+                    "A candidate failed the final hard-exclusion "
+                    "validation (overlaps mapped river/water/road/"
+                    "building or a DEM-derived drainage channel). "
+                    "This location cannot be recommended."
+                )
+
             # -------------------------------------------------
             # Catchment
             #
@@ -909,6 +1143,29 @@ def analyze_contour_file(
             "free_cell_count":
                 land_filter.free_cell_count,
 
+            # Per-category OSM-excluded cell counts (diagnostics)
+            "excluded_water_cells":
+                land_filter.excluded_water_cells,
+
+            "excluded_waterway_cells":
+                land_filter.excluded_waterway_cells,
+
+            "excluded_road_cells":
+                land_filter.excluded_road_cells,
+
+            "excluded_building_cells":
+                land_filter.excluded_building_cells,
+
+            # DEM-derived hydrology / total buildable diagnostics
+            "hydrology_excluded_cell_count":
+                int(hydrology_excluded_mask.sum()),
+
+            "buildable_cell_count":
+                int(buildable_mask.sum()),
+
+            "total_dem_cells":
+                int(terrain.valid_mask.sum()),
+
             "notes":
                 land_filter.notes,
         },
@@ -974,6 +1231,19 @@ def analyze_contour_file(
                 float(
                     min_accumulation_percentile
                 ),
+
+            # Candidate pipeline diagnostics
+            "initial_candidates":
+                initial_candidate_count,
+
+            "rejected_by_hard_footprint":
+                rejected_by_footprint,
+
+            "valid_after_footprint_validation":
+                len(candidate_cells),
+
+            "final_scored_candidates":
+                len(candidates),
         },
 
         # -------------------------------------------------
@@ -1007,17 +1277,40 @@ def analyze_contour_file(
             "candidate_generation":
                 (
                     "Local maxima of hydrological "
-                    "suitability restricted to OSM "
-                    "feature-clear land, with "
-                    "configurable minimum spacing"
+                    "suitability restricted to a single "
+                    "authoritative buildable mask "
+                    "(valid DEM AND OSM feature-clear "
+                    "land AND DEM-derived drainage-safe "
+                    "land), with configurable minimum "
+                    "spacing. Hard exclusions are applied "
+                    "before any scoring."
                 ),
 
             "land_filter":
                 (
-                    "OpenStreetMap/Overpass water, "
-                    "waterways, roads and buildings "
-                    "buffered by pond footprint radius "
-                    "before candidate selection"
+                    "OpenStreetMap/Overpass water, waterway, "
+                    "road and building features are treated "
+                    "as HARD exclusions and buffered by the "
+                    "proposed pond footprint radius before "
+                    "candidate selection."
+                ),
+
+            "hydrology_safety":
+                (
+                    "DEM-derived flow-accumulation channels "
+                    "are treated as hard exclusions with a "
+                    "configurable drainage percentile and "
+                    "safety buffer, so unmapped streams are "
+                    "also avoided."
+                ),
+
+            "footprint_validation":
+                (
+                    "Every candidate's full circular pond "
+                    "footprint is required to be entirely "
+                    "inside the buildable mask before it is "
+                    "accepted, with a final hard-validation "
+                    "pass before reporting recommendations."
                 ),
 
             "catchment":
