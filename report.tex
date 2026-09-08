@@ -1,0 +1,593 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{caption}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue,
+    citecolor=blue
+}
+
+\setlength{\parskip}{0.5em}
+
+\begin{document}
+
+% ============================================================
+% TITLE PAGE
+% ============================================================
+
+\begin{titlepage}
+    \centering
+    
+    \vspace*{1.5cm}
+    
+    {\Huge \textbf{AI-Based Village Pond Planning System}\par}
+    
+    \vspace{0.4cm}
+    
+    {\Large Assignment 1 -- Phase 2\par}
+    
+    \vspace{1.5cm}
+    
+    {\large \textbf{Backend API and Terrain-Based Pond Analysis}\par}
+    
+    \vfill
+    
+    \begin{tabular}{rl}
+        \textbf{Submitted By:} & Jaswinder Singh \\
+        \textbf{Roll Number:} & \textit{Add Your Roll Number} \\
+        \textbf{Department:} & Computer Science and Engineering \\
+        \textbf{Institute:} & Indian Institute of Technology Bhilai \\
+        \textbf{Assignment:} & Assignment 1 -- Phase 2 \\
+        \textbf{Submission Date:} & 01/09/2026 \\
+    \end{tabular}
+    
+    \vfill
+    
+    {\large Indian Institute of Technology Bhilai\par}
+    
+\end{titlepage}
+
+% ============================================================
+% TABLE OF CONTENTS
+% ============================================================
+
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Introduction}
+
+Planning a village pond requires identifying locations where rainfall runoff can be
+effectively collected while considering terrain characteristics, drainage patterns,
+catchment area, and environmental suitability.
+
+The AI-Based Village Pond Planning System is designed as a geographical decision
+support platform for analyzing terrain and identifying suitable locations for pond
+construction. The system accepts contour data or a geographical location as input
+and performs terrain-based analysis using multiple computational modules.
+
+The backend is implemented as a REST API using FastAPI. The primary contour analysis
+endpoint accepts an uploaded contour file and performs terrain analysis, candidate
+generation, rainfall analysis, and multi-factor suitability evaluation.
+
+The frontend presents the generated results through an interactive geographical
+dashboard showing terrain information, candidate locations, catchment areas, and
+suitability scores.
+
+The implementation is designed as an extensible system so that additional
+hydrological, environmental, and geographical factors can be integrated in future
+phases.
+
+% ============================================================
+\section{Objectives}
+
+The main objectives of the system are:
+
+\begin{enumerate}
+    \item Develop a backend API for terrain-based pond planning.
+    \item Accept contour data as an input for geographical analysis.
+    \item Extract terrain and elevation information from contour data.
+    \item Generate terrain characteristics required for pond-site analysis.
+    \item Analyze drainage and flow accumulation patterns.
+    \item Identify multiple candidate locations for possible pond construction.
+    \item Integrate rainfall-related information into the analysis.
+    \item Perform multi-factor suitability analysis.
+    \item Estimate catchment-related information for candidate locations.
+    \item Return the complete analysis in structured JSON format.
+    \item Provide interactive API documentation using Swagger/OpenAPI.
+    \item Present the analysis results through an interactive frontend interface.
+\end{enumerate}
+
+% ============================================================
+\section{Functional Requirements}
+
+The system implements the following major functional requirements.
+
+\begin{table}[H]
+\centering
+\caption{Functional Requirements}
+\begin{tabular}{p{4cm} p{9cm}}
+\toprule
+\textbf{Requirement} & \textbf{Implementation} \\
+\midrule
+Contour Upload & Accepts contour files for terrain-based analysis. \\
+Terrain Analysis & Extracts elevation and terrain information from contour data. \\
+Candidate Generation & Identifies multiple possible locations for pond construction. \\
+Rainfall Analysis & Includes rainfall-related information in the planning process. \\
+Hydrological Analysis & Uses terrain and drainage characteristics for runoff concentration. \\
+Suitability Analysis & Ranks candidate locations using geographical and environmental factors. \\
+Catchment Analysis & Estimates the contributing catchment area for candidate locations. \\
+Structured Response & Returns analysis results as structured JSON data. \\
+API Documentation & Provides interactive Swagger/OpenAPI documentation through FastAPI. \\
+Frontend Visualization & Displays candidates, catchment areas, and rankings on an interactive map. \\
+Health Monitoring & Provides a health endpoint to verify backend service status. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\section{System Architecture}
+
+The system follows a client-server architecture. The frontend provides an interactive
+interface for selecting a geographical location or uploading contour information. The
+request is sent to the FastAPI backend, which coordinates the terrain, hydrology,
+rainfall, and suitability analysis modules.
+
+The major processing stages are:
+
+\begin{enumerate}
+    \item \textbf{Input Selection}: User selects a geographical location or uploads contour data.
+    \item \textbf{Contour Processing}: Backend extracts contour and elevation information.
+    \item \textbf{Terrain Analysis}: Terrain characteristics such as elevation and resolution are generated.
+    \item \textbf{Hydrological Processing}: Flow direction, drainage, and runoff characteristics are analyzed.
+    \item \textbf{Rainfall Analysis}: Rainfall information is incorporated into the planning process.
+    \item \textbf{Candidate Generation}: Potential pond locations are generated and evaluated.
+    \item \textbf{Multi-Factor Suitability Analysis}: Multiple factors are combined for suitability scoring.
+    \item \textbf{Catchment Analysis}: Catchment-related information is calculated for candidates.
+    \item \textbf{JSON Response}: Backend returns the complete analysis as structured JSON.
+    \item \textbf{Frontend Visualization}: Results are displayed on an interactive geographical dashboard.
+\end{enumerate}
+
+% ============================================================
+\section{Technology Stack}
+
+The system uses the following technologies.
+
+\begin{table}[H]
+\centering
+\caption{Technology Stack}
+\begin{tabular}{p{4cm} p{9cm}}
+\toprule
+\textbf{Technology} & \textbf{Purpose} \\
+\midrule
+Python & Primary programming language for backend development. \\
+FastAPI & REST API framework for implementing backend endpoints. \\
+Uvicorn & ASGI server to run the FastAPI application. \\
+Pydantic & Request validation and structured response models. \\
+NumPy & Numerical and terrain-related computations. \\
+OpenCV & Image and contour-related processing. \\
+Geospatial Services & Geographical, terrain, and location-related analysis. \\
+Swagger/OpenAPI & Interactive API documentation and endpoint testing. \\
+React / Modern Frontend & Interactive user interface for geographical visualization. \\
+Leaflet / Map Visualization & Interactive display of terrain, candidates, and catchments. \\
+Git/GitHub & Version control and source code hosting. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\section{API Design}
+
+The backend provides multiple endpoints for the pond planning workflow.
+
+\subsection{Primary Contour Analysis Endpoint}
+
+\begin{center}
+\texttt{POST /api/analyzeContour} \\
+\texttt{http://localhost:8000/api/analyzeContour}
+\end{center}
+
+This endpoint accepts a contour file and performs the analysis pipeline. The endpoint
+supports parameters related to terrain resolution, candidate generation, rainfall analysis,
+runoff coefficient, and pond dimensions.
+
+\subsection{Automatic Location Analysis Endpoint}
+
+\begin{center}
+\texttt{POST /api/analyzeLocation} \\
+\texttt{http://localhost:8000/api/analyzeLocation}
+\end{center}
+
+This endpoint can be used for automatic analysis based on a location input.
+
+\subsection{Health Endpoint}
+
+\begin{center}
+\texttt{GET /health} \\
+\texttt{http://localhost:8000/health}
+\end{center}
+
+This endpoint verifies whether the FastAPI backend is running correctly.
+
+\subsection{Root Endpoint}
+
+\begin{center}
+\texttt{GET /} \\
+\texttt{http://localhost:8000/}
+\end{center}
+
+This serves the main index.html file containing the interactive frontend interface.
+
+\subsection{API Documentation}
+
+\begin{center}
+\texttt{http://localhost:8000/docs}
+\end{center}
+
+The documentation contains the available endpoints, request parameters, request
+schemas, and response schemas.
+
+% ============================================================
+\section{API Endpoint Parameters}
+
+The primary contour analysis endpoint is \texttt{POST /api/analyzeContour} and accepts
+multipart form data.
+
+\begin{table}[H]
+\centering
+\caption{Contour Analysis Parameters}
+\begin{tabular}{p{4cm} p{3cm} p{6cm}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Description} \\
+\midrule
+file & File & Required contour file (KML/KMZ) used for terrain analysis. \\
+resolution\_m & Number & Spatial resolution (2-100 m) for terrain analysis. Default: 10.0. \\
+max\_candidates & Integer & Maximum number of candidate locations to generate (1-50). Default: 20. \\
+rainfall\_years & Integer & Number of rainfall years considered (1-30). Default: 5. \\
+runoff\_coefficient & Number & Coefficient for runoff estimation (0.0-1.0). Default: 0.30. \\
+pond\_radius\_m & Number & Approximate radius for pond planning (10-150 m). Default: 40.0. \\
+max\_pond\_depth\_m & Number & Maximum pond depth (1.0-6.0 m). Default: 3.0. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Location Analysis Parameters}
+\begin{tabular}{p{4cm} p{3cm} p{6cm}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Description} \\
+\midrule
+location\_name & String & Required location name for geographical analysis. \\
+analysis\_radius\_m & Number & Analysis radius in metres (500-10000 m). Default: 3000.0. \\
+contour\_interval\_m & Number & Contour interval for DEM generation (1-20 m). Default: 5.0. \\
+resolution\_m & Number & Spatial resolution (2-100 m). Default: 30.0. \\
+max\_candidates & Integer & Maximum number of candidates (1-50). Default: 20. \\
+rainfall\_years & Integer & Number of rainfall years (1-30). Default: 5. \\
+runoff\_coefficient & Number & Runoff coefficient (0.0-1.0). Default: 0.30. \\
+pond\_radius\_m & Number & Pond radius (10-150 m). Default: 40.0. \\
+max\_pond\_depth\_m & Number & Maximum pond depth (1.0-6.0 m). Default: 3.0. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ============================================================
+\section{Swagger API Documentation}
+
+The FastAPI backend provides automatically generated Swagger documentation. The Swagger
+interface displays the available API routes and allows the developer to inspect request
+parameters and response schemas.
+
+The contour analysis endpoint displayed in Swagger is \texttt{POST /api/analyzeContour}.
+The request body uses \texttt{multipart/form-data}. The required input includes the
+contour file, while additional optional parameters allow configuration of the terrain
+and pond analysis.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{images/analyze_contour_endpoint.png}
+\caption{Swagger documentation showing the Analyze Contour endpoint and request parameters}
+\label{fig:swagger_endpoint}
+\end{figure}
+
+% ============================================================
+\section{API Response Structure}
+
+The contour analysis endpoint returns a structured JSON response containing:
+
+\begin{itemize}
+    \item Analysis status and input filename
+    \item Terrain information including contour line count
+    \item Minimum and maximum elevation
+    \item Terrain resolution and grid dimensions
+    \item Rainfall information
+    \item Candidate generation information
+    \item Land filtering information
+    \item Suitability analysis
+    \item Catchment-related information
+    \item Error information when applicable
+\end{itemize}
+
+The Swagger response schema confirms that the API follows a structured response format
+for integration with the frontend.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{images/analyze_contour_response.png}
+\caption{Swagger response schema for the contour analysis endpoint}
+\label{fig:swagger_response}
+\end{figure}
+
+% ============================================================
+\section{Terrain and Hydrological Analysis}
+
+The terrain analysis pipeline processes the contour information to obtain a
+representation of the geographical area. The major terrain-related information includes
+contour line information, elevation range, terrain resolution, grid dimensions, surface
+slope, and drainage characteristics.
+
+The generated terrain information is subsequently used by the hydrological analysis
+modules. Hydrological processing is important because pond locations should preferably
+be associated with areas where surface runoff can naturally accumulate. The analysis
+considers terrain flow and drainage characteristics to identify potential areas for
+water collection.
+
+% ============================================================
+\section{Candidate Generation and Suitability Analysis}
+
+Potential pond locations are generated from the geographical analysis. Each candidate
+location is evaluated using multiple factors. The suitability analysis combines terrain
+and hydrological information with other available planning factors.
+
+The frontend interface displays ranked candidate locations. The highest-ranked location
+is identified as the top candidate, while additional candidate locations are also
+displayed for comparison.
+
+The suitability evaluation may include factors such as terrain characteristics, flow
+accumulation, drainage properties, catchment area, rainfall information, land-related
+constraints, accessibility, and environmental considerations.
+
+% ============================================================
+\section{Catchment Analysis}
+
+A catchment represents the geographical area from which water contributes toward a
+particular drainage outlet or candidate pond location. The system identifies
+catchment-related information using terrain and drainage characteristics.
+
+The catchment information is useful because a potential pond location should be
+associated with sufficient upstream runoff. The frontend visualizes the catchment
+area associated with the selected candidate location, allowing the user to visually
+understand the selected pond candidate, the surrounding terrain, the drainage region,
+the estimated catchment area, and other ranked candidate locations.
+
+% ============================================================
+\section{Frontend Visualization}
+
+The project includes an interactive frontend dashboard for visualizing the pond
+planning analysis. The frontend provides a geographical decision support interface
+displaying terrain analysis information, candidate ranking, suitability scores, flow
+accumulation information, valley position, drainage information, multi-factor
+suitability, elevation, catchment area, storage-related estimates, an interactive
+geographical map, candidate markers, catchment boundaries, and ranked pond locations.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{images/frontend_analysis_result.png}
+\caption{Frontend interface showing terrain analysis, ranked pond candidates, catchment area, and geographical visualization}
+\label{fig:frontend_result}
+\end{figure}
+
+% ============================================================
+\section{Backend Health Testing}
+
+The backend was tested using the health endpoint. An initial request was made to
+\texttt{http://localhost:8000/api/health}, which returned:
+
+\begin{verbatim}
+{"detail":"Not Found"}
+\end{verbatim}
+
+This occurred because the correct health route is not under the \texttt{/api} prefix.
+The correct endpoint is \texttt{http://localhost:8000/health}. The following command
+was executed:
+
+\begin{verbatim}
+curl http://localhost:8000/health
+\end{verbatim}
+
+The backend returned:
+
+\begin{verbatim}
+{"status":"healthy"}
+\end{verbatim}
+
+This confirms that the FastAPI backend was running successfully.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{images/health_response.png}
+\caption{Terminal output showing incorrect API route and successful health endpoint response}
+\label{fig:health_response}
+\end{figure}
+
+% ============================================================
+\section{Testing and Validation}
+
+The backend and frontend were tested using the following validation steps:
+
+\begin{enumerate}
+    \item Verified that the FastAPI backend starts successfully.
+    \item Opened the Swagger/OpenAPI documentation.
+    \item Verified the availability of the contour analysis endpoint.
+    \item Verified the request parameters for contour analysis.
+    \item Inspected the API response schema.
+    \item Tested the backend health endpoint.
+    \item Verified that the correct health endpoint returns a healthy response.
+    \item Verified that the frontend interface loads successfully.
+    \item Verified that candidate locations are displayed on the geographical map.
+    \item Verified that catchment information is visualized.
+    \item Verified that suitability rankings are displayed.
+\end{enumerate}
+
+The successful health response obtained from the backend was:
+\begin{verbatim}
+{"status":"healthy"}
+\end{verbatim}
+This confirms that the backend API service was operational during testing.
+
+% ============================================================
+\section{API Endpoints Summary}
+
+The following API endpoints were identified and used in the project.
+
+\begin{table}[H]
+\centering
+\caption{API Endpoints}
+\begin{tabular}{p{2cm} p{5cm} p{8cm}}
+\toprule
+\textbf{Method} & \textbf{Endpoint} & \textbf{Description} \\
+\midrule
+GET & / & Serves the frontend dashboard interface (index.html). \\
+GET & /health & Checks whether the FastAPI backend is running correctly. \\
+GET & /docs & Provides interactive Swagger/OpenAPI API documentation. \\
+POST & /api/analyzeContour & Analyzes an uploaded contour file and performs terrain and pond planning analysis. \\
+POST & /api/analyzeLocation & Performs location-based analysis and generates planning information. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The primary API endpoint used for contour analysis in this assignment is:
+
+\begin{center}
+\fbox{\texttt{POST http://localhost:8000/api/analyzeContour}}
+\end{center}
+
+The location-based analysis endpoint is:
+
+\begin{center}
+\fbox{\texttt{POST http://localhost:8000/api/analyzeLocation}}
+\end{center}
+
+The health endpoint successfully tested is:
+
+\begin{center}
+\fbox{\texttt{GET http://localhost:8000/health}}
+\end{center}
+
+The root endpoint serving the frontend is:
+
+\begin{center}
+\fbox{\texttt{GET http://localhost:8000/}}
+\end{center}
+
+The Swagger documentation is available at:
+
+\begin{center}
+\fbox{\texttt{http://localhost:8000/docs}}
+\end{center}
+
+% ============================================================
+\section{GitHub Repository}
+
+The complete source code for the project is maintained in the following GitHub repository:
+
+\begin{center}
+\url{https://github.com/Jas-thinks/AI-POND-RECOMMENDATION}
+\end{center}
+
+The repository contains the backend implementation, terrain analysis modules, hydrological
+analysis components, frontend application, and supporting project files.
+
+% ============================================================
+\section{Limitations}
+
+The current implementation has several limitations.
+
+\begin{enumerate}
+    \item The accuracy of terrain analysis depends on the quality and density of the provided contour information.
+    \item Geographical analysis can require significant computation for large areas.
+    \item Suitability scores represent computational estimates and should not be considered final engineering approval.
+    \item Catchment and storage estimates depend on the assumptions used by the terrain and hydrological models.
+    \item Real-world pond construction requires additional field verification.
+    \item Environmental, geological, and social factors may require further integration for production-level planning.
+\end{enumerate}
+
+% ============================================================
+\section{Future Extensions}
+
+The project has been designed to support further development. Possible future extensions include:
+
+\begin{itemize}
+    \item Integration with real-time rainfall datasets.
+    \item Improved Digital Elevation Model generation.
+    \item Advanced hydrological simulation.
+    \item Soil-type analysis.
+    \item Land-use and land-cover analysis.
+    \item Satellite imagery integration.
+    \item Environmental constraint analysis.
+    \item Improved storage capacity estimation.
+    \item Machine learning-based pond suitability prediction.
+    \item Historical rainfall trend analysis.
+    \item Persistent storage of analysis results.
+    \item User authentication.
+    \item Cloud deployment.
+    \item Large-scale regional pond planning.
+    \item Improved frontend visualization and reporting.
+\end{itemize}
+
+% ============================================================
+\section{Conclusion}
+
+The AI-Based Village Pond Planning System provides a backend-driven geographical
+decision support system for identifying potential pond construction locations. The
+system accepts contour or location-based input and performs terrain analysis,
+hydrological processing, candidate generation, rainfall analysis, catchment-related
+evaluation, and multi-factor suitability scoring.
+
+The FastAPI backend exposes structured REST API endpoints for performing the analysis.
+The primary contour analysis endpoint used in the system is:
+
+\begin{center}
+\texttt{POST http://localhost:8000/api/analyzeContour}
+\end{center}
+
+The backend was successfully verified using the health endpoint:
+
+\begin{center}
+\texttt{GET http://localhost:8000/health}
+\end{center}
+
+which returned:
+
+\begin{verbatim}
+{"status":"healthy"}
+\end{verbatim}
+
+Swagger/OpenAPI documentation was also successfully generated and accessed through:
+
+\begin{center}
+\texttt{http://localhost:8000/docs}
+\end{center}
+
+The frontend demonstrates the results through an interactive geographical dashboard
+containing ranked pond candidates, terrain information, suitability scores, and
+catchment visualization.
+
+The project therefore provides a strong foundation for further development into a
+comprehensive AI-assisted geographical planning platform for village pond construction
+and rainwater harvesting.
+
+\end{document}

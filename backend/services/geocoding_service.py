@@ -227,3 +227,7 @@ def geocode_place(query: str, radius_m: float = 3000.0) -> GeocodedPlace:
         f"Location '{query}' was not found. Try a different or more general name, "
         "for example 'Bhilai, Chhattisgarh, India' or 'Raipur, Chhattisgarh, India'."
     )
+
+
+resolve_location = geocode_place
+
