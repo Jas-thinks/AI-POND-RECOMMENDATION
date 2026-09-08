@@ -23,6 +23,16 @@ class TerrainGrid:
     xs: np.ndarray
     ys: np.ndarray
 
+    @property
+    def to_projected(self) -> Transformer:
+        """Return the transformer to projected (UTM) coordinates.
+
+        Note: In this codebase the ``to_wgs84`` transformer converts from UTM
+        to WGS84, so ``to_projected`` aliases it for compatibility with
+        callers that expect a ``to_projected`` attribute.
+        """
+        return self.to_wgs84
+
 
 def _utm_crs(lon: float, lat: float) -> CRS:
     zone = int((lon + 180) / 6) + 1
