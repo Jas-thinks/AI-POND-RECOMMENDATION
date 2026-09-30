@@ -1,6 +1,17 @@
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# =========================================================
+# Configuration
+# =========================================================
+
+# Allow per-candidate payloads to carry onward/auxiliary keys (e.g. the
+# analysis sub-reports the frontend renders) without silently stripping
+# them. The core fields are still fully validated; extras are preserved so
+# validated response models no longer mask/mangle the real data.
+POND_CANDIDATE_CONFIG = ConfigDict(extra="ignore")
 
 
 # =========================================================
@@ -86,10 +97,88 @@ class WaterMetrics(BaseModel):
 
 
 # =========================================================
+# Site justification ("the proof")
+#
+# A structured, audit-friendly answer to "why is this the best site".
+# Every number traces back to a real calculation: contribution always
+# equals raw_score * weight_used and final_score equals the sum of the
+# contributions across the four design factors.
+# =========================================================
+
+class FactorContribution(BaseModel):
+    factor: str
+    raw_score: float | None
+    weight_used: float | None
+    contribution: float | None
+    available: bool
+
+
+class MarginVsNextRank(BaseModel):
+    factor: str
+    delta: float
+    favors: str  # "this_candidate" | "next_rank" | "tie"
+
+
+class ExclusionClearance(BaseModel):
+    feature_type: str
+    nearest_distance_m: float | None
+    required_buffer_m: float
+    margin_m: float | None
+    note: str | None = None
+
+
+class DataConfidence(BaseModel):
+    soil: str
+    rainfall: str
+    land_use: str
+
+
+class CatchmentSiltation(BaseModel):
+    available: bool
+    vegetated_pct: float | None = None
+    farmland_pct: float | None = None
+    bare_pct: float | None = None
+    siltation_risk_score: float | None = None
+    source: str | None = None
+
+
+class DownstreamConflict(BaseModel):
+    flag: bool
+    checked: bool
+    nearest_conflict_type: str | None = None
+    distance_m: float | None = None
+
+
+class BeneficiaryProximity(BaseModel):
+    nearest_settlement_distance_m: float | None = None
+    buildings_within_1km: float | None = None
+    beneficiary_score: float | None = None
+    basis: str | None = None
+
+
+class SiteJustification(BaseModel):
+    candidate_id: int
+    final_score: float | None
+    factor_breakdown: list[FactorContribution]
+    hard_constraints_passed: list[str]
+    # Every candidate (rank i) is compared against the next rank (i+1); the
+    # last-ranked candidate in the returned set has this field null.
+    margin_vs_next_rank: list[MarginVsNextRank] | None = None
+    exclusion_clearance: list[ExclusionClearance] = []
+    catchment_landcover: CatchmentSiltation | None = None
+    downstream_conflict: DownstreamConflict | None = None
+    beneficiary: BeneficiaryProximity | None = None
+    data_confidence: DataConfidence
+    topsis: dict[str, Any]
+
+
+# =========================================================
 # Candidate
 # =========================================================
 
 class PondCandidate(BaseModel):
+    model_config = POND_CANDIDATE_CONFIG
+
     candidate_id: int
     rank: int
 
@@ -111,6 +200,32 @@ class PondCandidate(BaseModel):
     water: WaterMetrics
 
     land_status: str
+
+    # Per-candidate multi-factor analyses
+    soil_analysis: dict[str, Any] | None = None
+    climate_analysis: dict[str, Any] | None = None
+    water_availability: dict[str, Any] | None = None
+    land_use_analysis: dict[str, Any] | None = None
+    accessibility_analysis: dict[str, Any] | None = None
+    environmental_constraints: dict[str, Any] | None = None
+    storage_estimation: dict[str, Any] | None = None
+    hydrology_score: float | None = None
+    water_storage_score: float | None = None
+    beneficiary_score: float | None = None
+    multi_factor_score: dict[str, Any] | None = None
+
+    # Reported-but-unranked indicators
+    beneficiary_metrics: dict[str, Any] | None = None
+    catchment_landcover: CatchmentSiltation | None = None
+    downstream_conflict: DownstreamConflict | None = None
+    exclusion_clearance: list[ExclusionClearance] = []
+
+    # Ranking bookkeeping
+    initial_rank: int | None = None
+    final_rank: int | None = None
+
+    # The enforced justification model for this candidate
+    site_justification: SiteJustification | None = None
 
 
 # =========================================================
@@ -141,7 +256,17 @@ class AnalysisResponse(BaseModel):
 
     excluded_areas_geojson: dict[str, Any] | None = None
 
-    candidates: list[dict[str, Any]]
+    candidates: list[PondCandidate]
+
+    # Spatially-diversified final top-N actually recommended to the frontend.
+    selected_candidates: list[PondCandidate] = []
+
+    # High-ranked candidates set aside because they sit within the
+    # separation radius of a selected candidate (kept visible, not dropped).
+    nearby_alternatives: list[PondCandidate] = []
+
+    # Number of candidates skipped by the spatial-diversification pass.
+    diversified_skipped: int = 0
 
     recommended_candidate_id: int
 
@@ -268,9 +393,11 @@ class MultiFactorScore(BaseModel):
     unavailable_factors: list[str]
     weights_used: dict[str, str]
     factor_breakdown: dict[str, dict]
+    consolidated_factors: list[FactorContribution] = []
+    final_rank: int | None = None
 
 
-class DataConfidence(BaseModel):
+class DataConfidenceSummary(BaseModel):
     overall_confidence: str
     data_sources_available: list[str]
     data_sources_missing: list[str]

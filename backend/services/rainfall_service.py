@@ -77,7 +77,7 @@ def get_historical_rainfall(
             "latitude": latitude,
             "longitude": longitude,
             "period": "unavailable",
-            "average_annual_rainfall_mm": 800.0,
+            "average_annual_rainfall_mm": None,
             "yearly": [],
             "error": str(exc),
         }

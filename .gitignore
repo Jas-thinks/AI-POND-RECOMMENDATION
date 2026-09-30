@@ -30,6 +30,8 @@ frontend/dist/
 # Generated/runtime data
 data/generated/
 data/cache/
+backend/validation/_work/
+backend/validation/validation_report.json
 
 # IDE
 .vscode/
@@ -38,3 +40,7 @@ data/cache/
 # OS
 .DS_Store
 Thumbs.db
+
+# AI agent / Command Code artifacts
+.commandcode/
+script.txt

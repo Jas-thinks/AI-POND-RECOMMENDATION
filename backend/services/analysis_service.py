@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 
@@ -8,14 +9,17 @@ import numpy as np
 from rasterio.features import shapes
 
 from scipy.ndimage import binary_dilation
+from scipy.ndimage import distance_transform_edt
 
 from shapely.geometry import (
     mapping,
+    Point,
     shape,
 )
 
 from shapely.ops import (
     transform as shapely_transform,
+    nearest_points,
     unary_union,
 )
 
@@ -50,6 +54,7 @@ from backend.services.kml_service import (
 from backend.services.land_service import (
     BufferConfig,
     build_osm_free_land_mask,
+    compute_exclusion_clearance,
     DEFAULT_BUFFER_CONFIG,
 )
 
@@ -90,7 +95,19 @@ from backend.services.storage_estimation import (
 )
 
 from backend.services.multifactor_suitability import (
-    score_candidate,
+    diversify_top_n,
+    practical_raw_score,
+    rank_candidates_topsis,
+)
+
+from backend.services.beneficiary_service import (
+    beneficiary_metrics,
+    fetch_beneficiary_data,
+)
+
+from backend.services.watershed_service import (
+    compute_siltation_risk,
+    trace_downstream_conflict,
 )
 
 from backend.services.data_confidence import (
@@ -124,20 +141,28 @@ class HydrologySafetyConfig:
     flow-accumulation grid reveals strong/obvious drainage channels
     that are treated as hard exclusion corridors.
 
+    The threshold is intentionally set to the extreme tail of the
+    non-zero accumulation distribution (99.5th percentile) so that
+    only major, well-defined drainage/channel cores are excluded.
+    Broad high-accumulation but non-channel areas remain available
+    for candidate selection, preserving large contributing catchments
+    while still preventing ponds from being placed directly on a
+    channel centre.
+
     Attributes
     ----------
     enabled : bool
         Whether to apply the DEM-derived hydrology safety mask.
     accumulation_percentile : float
         Percentile (0-100) of non-zero flow accumulation used as the
-        channel threshold. Cells at or above this percentile are
+        channel-core threshold. Cells at or above this percentile are
         treated as drainage channels and excluded.
     buffer_m : float
         Extra radius (metres) applied around detected channels.
     """
 
     enabled: bool = True
-    accumulation_percentile: float = 95.0
+    accumulation_percentile: float = 99.5
     buffer_m: float = 10.0
 
 
@@ -148,13 +173,13 @@ def build_hydrology_safety_mask(
     config: HydrologySafetyConfig | None = None,
 ) -> np.ndarray:
     """
-    Build a boolean mask of DEM-derived drainage channels (streams,
-    river corridors) to be treated as HARD exclusions.
+    Build a boolean mask of DEM-derived drainage channel cores
+    (streams, river centres) to be treated as HARD exclusions.
 
-    A cell contributes to a channel when its flow accumulation is at
+    A cell contributes to a channel core when its flow accumulation is at
     or above a configurable percentile of the non-zero accumulation
     distribution, dilated by an optional buffer / pond footprint so
-    the entire proposed pond stays out of the channel corridor.
+    the entire proposed pond stays out of the channel core.
     """
     if config is None:
         config = HydrologySafetyConfig()
@@ -244,6 +269,168 @@ def candidate_footprint_in_buildable_mask(
 
     # All cells inside the pond disk must be buildable.
     return bool(np.all(window[in_disk]))
+
+
+# ---------------------------------------------------------
+# Hydrology factor: per-candidate catchment + drainage proximity
+# ---------------------------------------------------------
+
+DRAINAGE_CHANNEL_PERCENTILE = 95.0
+
+
+def build_channel_distance_grid(
+    accumulation: np.ndarray,
+    valid_mask: np.ndarray,
+    resolution_m: float,
+    percentile: float = DRAINAGE_CHANNEL_PERCENTILE,
+) -> np.ndarray | None:
+    """
+    Build a grid whose value at every cell is the distance (metres) to the
+    nearest strong DEM-derived drainage channel (a cell whose flow
+    accumulation is at or above the configured percentile of the non-zero
+    distribution).
+
+    Returns None when no drainage channel can be identified.
+    """
+    acc_nonzero = accumulation[
+        valid_mask & np.isfinite(accumulation) & (accumulation > 0)
+    ]
+    if acc_nonzero.size == 0:
+        return None
+
+    threshold = float(np.nanpercentile(acc_nonzero, percentile))
+    channel_mask = valid_mask & np.isfinite(accumulation) & (accumulation >= threshold)
+
+    if not channel_mask.any():
+        return None
+
+    # distance_transform_edt measures distance to the nearest background
+    # (0) cell. Passing ~channel_mask makes the channels the background,
+    # so the result is the distance (in cells) to the nearest channel.
+    distance_cells = distance_transform_edt(~channel_mask)
+    return distance_cells * resolution_m
+
+
+def hydrology_score(
+    catchment_cell_count: int,
+    resolution_m: float,
+    channel_distance_m: float | None,
+) -> float | None:
+    """
+    Score candidate hydrology from its own delineated catchment size and
+    its proximity to strong drainage channels.
+
+    Bigger catchments score higher; being at a safe distance from a
+    drainage channel (water supply without sitting on the channel core)
+    scores higher than being on top of it or far from any drainage.
+    Returns None only if the catchment could not be derived.
+    """
+    if catchment_cell_count is None or catchment_cell_count <= 0:
+        return None
+
+    cell_area_m2 = resolution_m * resolution_m
+    area_m2 = float(catchment_cell_count) * cell_area_m2
+    area_ha = area_m2 / 10_000.0
+
+    # Catchment size component (0-50): larger contributing area is better.
+    size_component = min(50.0, 15.0 * math.log10(1.0 + area_ha))
+
+    # Channel-proximity component (0-50): a moderate, safe distance from a
+    # drainage channel provides water supply without the pond sitting on or
+    # undercutting the channel core.
+    if channel_distance_m is None:
+        proximity = 20.0
+    elif channel_distance_m < 50.0:
+        proximity = 12.0 + channel_distance_m / 5.0
+    elif channel_distance_m <= 250.0:
+        proximity = 46.0 + (channel_distance_m - 50.0) / 40.0
+    elif channel_distance_m <= 400.0:
+        proximity = 50.0
+    elif channel_distance_m <= 1200.0:
+        proximity = 50.0 - (channel_distance_m - 400.0) / 80.0
+    else:
+        proximity = max(10.0, 40.0 - (channel_distance_m - 1200.0) / 200.0)
+
+    return round(min(100.0, size_component + proximity), 2)
+
+
+# ---------------------------------------------------------
+# Water / storage factor: limited by the smaller of supply and capacity
+# ---------------------------------------------------------
+
+def water_storage_score(
+    water_availability: dict | None,
+    storage_estimation: dict | None,
+) -> float | None:
+    """
+    Normalise the limiting volume min(runoff supply, storage capacity)
+    onto a 0-100 score. If either quantity is unavailable the factor is
+    dropped (returns None) rather than substituted with a fabricated value.
+    """
+    runoff = (water_availability or {}).get("estimated_annual_runoff_m3")
+    storage = (storage_estimation or {}).get("estimated_storage_volume_m3")
+
+    if not isinstance(runoff, (int, float)) or not isinstance(storage, (int, float)):
+        return None
+
+    limiting = min(float(runoff), float(storage))
+    if limiting <= 0:
+        return None
+
+    if limiting >= 5000:
+        score = 90.0
+    elif limiting >= 3000:
+        score = 82.0
+    elif limiting >= 1500:
+        score = 72.0
+    elif limiting >= 800:
+        score = 62.0
+    elif limiting >= 400:
+        score = 48.0
+    elif limiting >= 200:
+        score = 32.0
+    else:
+        score = 18.0
+
+    return round(score, 1)
+
+
+# ---------------------------------------------------------
+# Accessibility: true nearest-road distance from OSM road geometry
+# ---------------------------------------------------------
+
+def nearest_road_distance_m(
+    candidate_x: float,
+    candidate_y: float,
+    road_geometries: list,
+) -> float | None:
+    """
+    Compute the distance (metres) from a candidate to the nearest OSM road,
+    using shapely.ops.nearest_points against the raw road geometries already
+    fetched for the hard-exclusion analysis.
+
+    Returns None when no road geometry is available.
+    """
+    if not road_geometries:
+        return None
+
+    point = Point(candidate_x, candidate_y)
+    best: float | None = None
+
+    for road in road_geometries:
+        if road.is_empty:
+            continue
+        try:
+            nearest = nearest_points(point, road)
+            d = nearest[0].distance(nearest[1])
+        except Exception:
+            # Invalid geometry: ignore this road rather than failing the
+            # whole candidate.
+            continue
+        if best is None or d < best:
+            best = d
+
+    return best
 
 
 # ---------------------------------------------------------
@@ -603,15 +790,124 @@ def analyze_contour_file(
         )
     )
 
+    # Distance (metres) of every DEM cell to the nearest strong DEM-derived
+    # drainage channel, used by the per-candidate hydrology factor.
+    channel_distance_grid = (
+        build_channel_distance_grid(
+            accumulation,
+            terrain.valid_mask,
+            terrain.resolution_m,
+        )
+    )
+
+    # =====================================================
+    # STEP 10.5
+    # Regional climate / rainfall analysis (computed once at the
+    # analysis-area centroid; it is a regional data source and is not
+    # recomputed per candidate).
+    # =====================================================
+
+    region_lat = boundary_wgs84.centroid.y
+    region_lon = boundary_wgs84.centroid.x
+
+    with timed_stage("Climate analysis"):
+        climate_analysis = get_climate_analysis(
+            region_lat,
+            region_lon,
+            rainfall_years,
+        )
+
+    # =====================================================
+    # STEP 10.6
+    # Beneficiary proximity data (computed once at the analysis-area
+    # centroid, not per candidate). This is a separate semantic query from
+    # the hard-exclusion building pass: residences/settlements are used for
+    # proximity counting, never for exclusion.
+    # =====================================================
+
+    region_lat = boundary_wgs84.centroid.y
+    region_lon = boundary_wgs84.centroid.x
+
+    with timed_stage("Beneficiary proximity"):
+        beneficiary_data = fetch_beneficiary_data(
+            region_lat,
+            region_lon,
+        )
+
     # =====================================================
     # STEP 11
-    # Calculate catchment + water information for
-    # every candidate
+    # Calculate catchment + water + multi-factor information
+    # for every candidate
     # =====================================================
 
     candidates = []
 
     recommended_catchment_geojson = None
+
+    # =====================================================
+    # STEP 11.5
+    # Pre-fetch the network-bound per-candidate analyses in parallel.
+    #
+    # get_soil_data and get_landuse_analysis each make a blocking remote
+    # HTTP request. Running them serially inside the candidate loop costs
+    # ~2 network round-trips per candidate and dominates wall-clock. They
+    # are fully independent across candidates, so we batch them with a
+    # thread pool: the OSMSafe/land-use servers are the slow part and
+    # overlap cleanly. Results are keyed by grid cell so the loop below
+    # just reads the prepared lookup.
+    # =====================================================
+
+    candidate_geos = {}
+    for cell in candidate_cells:
+        _cx = float(terrain.xs[cell.col])
+        _cy = float(terrain.ys[cell.row])
+        _lon, _lat = terrain.to_wgs84.transform(_cx, _cy)
+        candidate_geos[(cell.row, cell.col)] = (_lat, _lon, _cx, _cy)
+
+    # Resolve shared module-level helpers so the pool workers reference them
+    # by name (threads share the interpreter; this is for clarity only).
+    _soil_fn = get_soil_data
+    _landuse_fn = get_landuse_analysis
+    _road_fn = nearest_road_distance_m
+    _clearance_fn = compute_exclusion_clearance
+    _road_geoms = land_filter.road_geometries
+    _raw_geoms = land_filter.raw_geometries_by_category
+
+    def _prefetch(cell_key):
+        lat, lon, x, y = candidate_geos[cell_key]
+        soil = _soil_fn(lat, lon)
+        landuse = _landuse_fn(lat, lon, radius_m=1500.0)
+        road = _road_fn(x, y, _road_geoms)
+        clearance = _clearance_fn(
+            candidate_point=Point(x, y),
+            raw_geometries_by_category=_raw_geoms,
+            pond_radius_m=pond_radius_m,
+            safety_buffer_m=10.0,
+            buffer_config=buffer_config,
+        )
+        return soil, landuse, road, clearance
+
+    # A bounded thread pool that issues the remote soil + land-use requests
+    # and the CPU-heavy per-candidate geometry computations concurrently
+    # across all candidate cells. Results are combined back into per-cell
+    # lookups before the main loop starts.
+    from concurrent.futures import ThreadPoolExecutor
+
+    soil_lookup: dict = {}
+    landuse_lookup: dict = {}
+    road_lookup: dict = {}
+    clearance_lookup: dict = {}
+
+    keys = list(candidate_geos.keys())
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(keys)))) as ex:
+        results = ex.map(_prefetch, keys)
+        for cell_key, (soil_res, landuse_res, road_res, clearance_res) in zip(
+            keys, results
+        ):
+            soil_lookup[cell_key] = soil_res
+            landuse_lookup[cell_key] = landuse_res
+            road_lookup[cell_key] = road_res
+            clearance_lookup[cell_key] = clearance_res
 
     with timed_stage("Candidate evaluation"):
 
@@ -654,71 +950,41 @@ def analyze_contour_file(
             # -------------------------------------------------
             # Catchment
             #
-            # IMPORTANT (Render-safety optimisation):
-            # Full BFS catchment raster delineation is expensive
-            # and duplicates work already captured by the D8 flow
-            # accumulation grid. A cell's ``accumulation`` value is
-            # exactly the number of upstream cells draining to it,
-            # i.e. its catchment cell count.
+            # Delineate the full D8 catchment for EVERY candidate so the
+            # cascade/water metrics are per-candidate and exact. The
+            # detailed mask is also what feeds the hydrology factor, so we
+            # no longer shortcut it to a handful of top-ranked cells.
             #
-            # We therefore run the detailed mask-based delineation
-            # for only the highest-ranked ``detailed_catchment_count``
-            # candidates (used to build the recommended catchment
-            # geometry) and derive the catchment cell count / area
-            # from flow accumulation for the remainder. Candidate
-            # ranking, scoring and the per-candidate ``catchment``
-            # summary structure are completely unchanged.
+            # The mask array is kept only for the top-ranked candidate,
+            # which is turned into the recommended catchment GeoJSON; the
+            # remaining masks are freed immediately after counting to limit
+            # peak memory.
             # -------------------------------------------------
-    
-            if rank <= max(1, min(int(detailed_catchment_count), len(candidate_cells))):
-    
-                catchment_mask = (
-                    delineate_catchment(
-    
-                        direction,
-    
-                        terrain.valid_mask,
-    
-                        row,
-    
-                        column,
-                    )
-                )
-    
-                cell_count = int(
-                    catchment_mask.sum()
-                )
 
-                # Keep the array only for the top-ranked candidate which is
-                # turned into the recommended catchment GeoJSON; free detailed
-                # masks immediately after counting to limit peak memory.
-                if rank != 1:
-                    del catchment_mask
-            else:
-    
-                # Cheap source: upstream contributing-cell count.
-                catchment_mask = None
-    
-                cell_count = int(
-                    round(
-                        float(
-                            accumulation[
-                                row,
-                                column,
-                            ]
-                        )
-                    )
+            catchment_mask = (
+                delineate_catchment(
+                    direction,
+                    terrain.valid_mask,
+                    row,
+                    column,
                 )
-    
+            )
+
+            cell_count = int(
+                catchment_mask.sum()
+            )
+
+            # NOTE: the catchment_mask is deliberately kept alive here. It is
+            # needed again for the per-candidate siltation-risk computation
+            # later in the loop (after the land-use analysis is available).
+            # It is freed explicitly once that metric is computed.
+
             area_m2 = float(
-    
                 cell_count
-    
                 * terrain.resolution_m
-    
                 * terrain.resolution_m
             )
-    
+
             # -------------------------------------------------
             # Grid → longitude / latitude
             # -------------------------------------------------
@@ -775,24 +1041,183 @@ def analyze_contour_file(
                         max_pond_depth_m,
                 )
             )
-    
+
             candidate_id = rank
-    
+
+            # -------------------------------------------------
+            # Multi-factor analysis is computed per candidate so soil,
+            # land-use, water availability, storage and accessibility are
+            # evaluated at the actual candidate location rather than once
+            # at a regional centroid. Road distance comes from the OSM road
+            # geometry already fetched for the hard-exclusion pass.
+            # -------------------------------------------------
+
+            # Per-candidate soil texture (pre-fetched in parallel in STEP 11.5).
+            soil_analysis_cand = soil_lookup[(row, column)]
+
+            # Per-candidate land use / land cover (pre-fetched in parallel).
+            land_use_analysis_cand = landuse_lookup[(row, column)]
+
+            # Real nearest-road distance from OSM road geometry (metres) -- precomputed
+            # in parallel in STEP 11.5 using the candidate's projected coords.
+            road_distance_m = road_lookup[(row, column)]
+
+            accessibility = get_accessibility_analysis(
+                nearest_road_distance_m=road_distance_m,
+                latitude=latitude,
+                longitude=longitude,
+            )
+
+            # Water availability / runoff supply
+            water_avail = estimate_water_availability(
+                catchment_area_m2=area_m2,
+                annual_rainfall_mm=average_rainfall_mm,
+                runoff_coefficient=runoff_coefficient,
+                land_cover_type=land_use_analysis_cand.get("dominant_land_use"),
+                soil_permeability=soil_analysis_cand.get("permeability"),
+            )
+
+            # Storage estimation
+            storage = estimate_storage(
+                surface_area_m2=water.get("pond_area_m2"),
+                max_depth_m=max_pond_depth_m,
+            )
+
+            # Hydrology factor: own catchment size + drainage proximity.
+            candidate_channel_distance_m = None
+            if channel_distance_grid is not None:
+                candidate_channel_distance_m = float(
+                    channel_distance_grid[row, column]
+                )
+            hydrology_score_val = hydrology_score(
+                cell_count,
+                terrain.resolution_m,
+                candidate_channel_distance_m,
+            )
+
+            # Water/storage factor: limited by the smaller of supply and
+            # capacity.
+            water_score_val = water_storage_score(water_avail, storage)
+
+            # Soft environmental constraints
+            constraints = evaluate_constraints(
+                land_filter_result=land_filter.__dict__,
+                land_use_restrictions=land_use_analysis_cand.get("restrictions"),
+            )
+
+            # -------------------------------------------------
+            # Benfeficiary proximity metric (per candidate).
+            #
+            # Uses the beneficiary data fetched once at the region centroid
+            # and computes the proximity of THIS candidate's location to
+            # settlements / residential buildings. The 0-1 score is derived
+            # via a distance decay (see beneficiary_service.MAX_USEFUL_DISTANCE_M).
+            # -------------------------------------------------
+
+            beneficiary_metrics_cand = beneficiary_metrics(
+                candidate_lat=latitude,
+                candidate_lon=longitude,
+                beneficiary_data=beneficiary_data,
+            )
+            beneficiary_score_val = beneficiary_metrics_cand.get("beneficiary_score")
+
+            # -------------------------------------------------
+            # Catchment siltation risk (reported, not ranked).
+            #
+            # Reuses the candidate's own catchment raster (already
+            # delineated above) and the per-candidate land-use data. The
+            # metric classifies the catchment's land cover into vegetated /
+            # farmland / bare buckets and produces a maintenance-outlook
+            # score. It is exposed alongside the ranking, NOT folded into
+            # TOPSIS as a sixth weighted factor.
+            # -------------------------------------------------
+
+            catchment_landcover = compute_siltation_risk(
+                catchment_mask=catchment_mask,
+                land_use_metrics=[land_use_analysis_cand],
+            )
+
+            # Identify downstream conflict by walking the D8 grid forward
+            # from the candidate outlet and checking for settlements / water
+            # bodies / farmland watercourses along the path. This is a flag
+            # for human review and never reranks the candidate.
+            downstream_conflict = trace_downstream_conflict(
+                outlet_row=row,
+                outlet_col=column,
+                direction=direction,
+                valid_mask=terrain.valid_mask,
+                resolution_m=terrain.resolution_m,
+                beneficiary_data=beneficiary_data,
+                land_use_metrics=[land_use_analysis_cand],
+                water_geometries=land_filter.raw_geometries_by_category.get("water"),
+                cell_to_wgs84=(
+                    lambda r, c: terrain.to_wgs84.transform(
+                        float(terrain.xs[c]),
+                        float(terrain.ys[r]),
+                    )
+                ),
+                cell_to_projected=(
+                    lambda r, c: (float(terrain.xs[c]), float(terrain.ys[r]))
+                ),
+            )
+
+            # Only the top-ranked candidate's catchment is turned into the
+            # recommended GeoJSON to avoid filling the map with many polygons.
+            # Capture it here while ``catchment_mask`` is still live.
+            if rank == 1 and catchment_mask is not None:
+                recommended_catchment_geojson = _mask_to_geojson(
+                    catchment_mask,
+                    terrain.transform,
+                    terrain.to_wgs84,
+                )
+
+            # The catchment mask is no longer needed after the siltation
+            # metric is computed; free it to bound peak memory.
+            del catchment_mask
+
+            # Exclusion-clearance for this candidate -- precomputed in parallel in
+            # STEP 11.5 against the raw (un-buffered) OSM geometries already
+            # fetched for the hard-exclusion mask, using the same buffer
+            # constants. No second Overpass call and no new numbers here.
+            exclusion_clearance = clearance_lookup[(row, column)]
+
+            # -------------------------------------------------
+            # Six raw factor scores (0-100) for the TOPSIS decision
+            # matrix. Per-candidate and fully independent:
+            #   terrain       - DEM slope/elevation/relief suitability.
+            #   hydrology     - own catchment size + drainage proximity.
+            #   water_storage - min(runoff supply, storage capacity).
+            #   practical     - soil, land use and road accessibility.
+            #   beneficiary   - proximity to settlements/buildings.
+            # -------------------------------------------------
+
+            practical_raw = practical_raw_score(
+                soil_analysis_cand,
+                land_use_analysis_cand,
+                accessibility,
+            )
+
+            factor_scores = {
+                "terrain": cell.score,
+                "hydrology": hydrology_score_val,
+                "water_storage": water_score_val,
+                "practical": practical_raw,
+                "beneficiary": beneficiary_score_val,
+            }
             candidates.append(
                 {
-    
                     "candidate_id":
                         candidate_id,
-    
+
                     "rank":
                         rank,
-    
+
                     "latitude":
                         float(latitude),
-    
+
                     "longitude":
                         float(longitude),
-    
+
                     "elevation_m":
                         round(
                             float(
@@ -803,7 +1228,7 @@ def analyze_contour_file(
                             ),
                             3,
                         ),
-    
+
                     "slope_percent":
                         round(
                             float(
@@ -814,7 +1239,7 @@ def analyze_contour_file(
                             ),
                             3,
                         ),
-    
+
                     "flow_accumulation_cells":
                         int(
                             round(
@@ -826,7 +1251,7 @@ def analyze_contour_file(
                                 )
                             )
                         ),
-    
+
                     "suitability_score":
                         round(
                             float(
@@ -834,18 +1259,18 @@ def analyze_contour_file(
                             ),
                             2,
                         ),
-    
+
                     "catchment": {
-    
+
                         "cell_count":
                             cell_count,
-    
+
                         "area_m2":
                             round(
                                 area_m2,
                                 2,
                             ),
-    
+
                         "area_hectares":
                             round(
                                 area_m2
@@ -853,10 +1278,10 @@ def analyze_contour_file(
                                 4,
                             ),
                     },
-    
+
                     "water":
                         water,
-    
+
                     "land_status": (
                         "Feature-clear according to "
                         "OpenStreetMap: candidate footprint "
@@ -865,144 +1290,226 @@ def analyze_contour_file(
                         "Legal ownership still requires "
                         "official verification."
                     ),
+
+                    # Per-candidate multi-factor fields
+                    "soil_analysis":
+                        soil_analysis_cand,
+
+                    "climate_analysis":
+                        climate_analysis,
+
+                    "water_availability":
+                        water_avail,
+
+                    "land_use_analysis":
+                        land_use_analysis_cand,
+
+                    "accessibility_analysis":
+                        accessibility,
+
+                    "environmental_constraints":
+                        constraints,
+
+                    "storage_estimation":
+                        storage,
+
+                    "hydrology_score":
+                        hydrology_score_val,
+
+                    "water_storage_score":
+                        water_score_val,
+
+                    "beneficiary_metrics":
+                        beneficiary_metrics_cand,
+
+                    "beneficiary_score":
+                        beneficiary_score_val,
+
+                    "catchment_landcover":
+                        catchment_landcover,
+
+                    "downstream_conflict":
+                        downstream_conflict,
+
+                    "exclusion_clearance":
+                        exclusion_clearance,
+
+                    "factor_scores":
+                        factor_scores,
                 }
             )
-    
-            # Only show top candidate catchment for now
-            # to avoid filling entire map with many polygons.
-    
-            if rank == 1 and catchment_mask is not None:
-    
-                recommended_catchment_geojson = (
-                    _mask_to_geojson(
-    
-                        catchment_mask,
-    
-                        terrain.transform,
-    
-                        terrain.to_wgs84,
-                    )
-                )
-
-    with timed_stage("Multi-factor analysis"):
-        # =====================================================
-        # =====================================================
-        # STEP 12
-        # Multi-factor environmental analysis
-        # =====================================================
-    
-        # Get centroid for regional data lookups
-        region_lat = boundary_wgs84.centroid.y
-        region_lon = boundary_wgs84.centroid.x
-    
-        # Soil analysis
-        soil_analysis = get_soil_data(region_lat, region_lon)
-    
-        # Climate / rainfall analysis
-        climate_analysis = get_climate_analysis(region_lat, region_lon, rainfall_years)
-    
-        # Land-use analysis around recommended candidate
-        if candidates:
-            best = candidates[0]
-            land_use_analysis = get_landuse_analysis(
-                best["latitude"],
-                best["longitude"],
-                radius_m=1500.0,
-            )
-        else:
-            land_use_analysis = get_landuse_analysis(region_lat, region_lon, radius_m=1500.0)
-    
-        # Per-candidate multi-factor scoring
-        mf_candidates = []
-        for cand in candidates:
-            catchment_area = cand.get("catchment", {}).get("area_m2", 0)
-    
-            # Water availability
-            water_avail = estimate_water_availability(
-                catchment_area_m2=catchment_area,
-                annual_rainfall_mm=average_rainfall_mm,
-                runoff_coefficient=runoff_coefficient,
-                land_cover_type=land_use_analysis.get("dominant_land_use"),
-                soil_permeability=soil_analysis.get("permeability"),
-            )
-    
-            # Accessibility
-            accessibility = get_accessibility_analysis(nearest_road_distance_m=None)
-    
-            # Storage estimation
-            storage = estimate_storage(
-                surface_area_m2=cand.get("water", {}).get("pond_area_m2"),
-                max_depth_m=max_pond_depth_m,
-            )
-    
-            # Constraints
-            constraints = evaluate_constraints(
-                land_filter_result=land_filter.__dict__,
-                land_use_restrictions=land_use_analysis.get("restrictions"),
-            )
-    
-            # Multi-factor score
-            mf_score = score_candidate(
-                candidate=cand,
-                soil_analysis=soil_analysis,
-                rainfall_analysis=climate_analysis,
-                water_availability=water_avail,
-                land_use_analysis=land_use_analysis,
-                accessibility_analysis=accessibility,
-            )
-    
-            mf_candidates.append({
-                **cand,
-                "soil_analysis": soil_analysis,
-                "climate_analysis": climate_analysis,
-                "water_availability": water_avail,
-                "land_use_analysis": land_use_analysis,
-                "accessibility_analysis": accessibility,
-                "environmental_constraints": constraints,
-                "storage_estimation": storage,
-                "multi_factor_score": mf_score,
-            })
-    
-        candidates = mf_candidates
-    
-        # Data confidence assessment
-        data_confidence = assess_confidence(
-            dem_available=True,
-            hydrology_available=True,
-            rainfall_available=climate_analysis.get("available"),
-            soil_available=soil_analysis.get("available"),
-            land_use_available=land_use_analysis.get("available"),
-            osm_available=True,
-            storage_available=True,
-    )
 
     # =====================================================
     # STEP 12.5
-    # Preserve original terrain rank then re-rank by
-    # final multi-factor score
+    # Preserve original terrain rank, then rank all survivors by TOPSIS
+    # closeness to the ideal solution. rank_candidates_topsis builds the
+    # weighted decision matrix, computes S_plus / S_minus / C_i, reorders
+    # the list by descending closeness and fills in the ranking fields.
     # =====================================================
     for cand in candidates:
         cand["initial_rank"] = cand.get("rank", 0)
 
-    # Sort by multi-factor final_score (descending). Fall back to
-    # original terrain suitability score if multi-factor score missing.
-    def _sort_key(c):
-        mf = c.get("multi_factor_score") or {}
-        fs = mf.get("final_score")
-        if fs is None:
-            return float(c.get("suitability_score") or 0)
-        return float(fs)
+    with timed_stage("TOPSIS ranking"):
+        candidates = rank_candidates_topsis(candidates)
 
-    candidates.sort(key=_sort_key, reverse=True)
-
-    # Re-assign final_rank (1-based)
+    # Re-assign final_rank (1-based) on the TOPSIS-ordered list and keep the
+    # multi_factor_score reference in sync for the frontend.
     for new_rank, cand in enumerate(candidates, start=1):
         cand["final_rank"] = new_rank
         cand["rank"] = new_rank
-        # Keep mf_score reference so frontend can show per-candidate
-        # multi-factor without traversing
         if cand.get("multi_factor_score"):
             cand["multi_factor_score"]["final_rank"] = new_rank
+
+    # =====================================================
+    # STEP 12.6
+    # Spatially diversify the final top-N.
+    #
+    # The TOPSIS ranking is ~100 m peak spacing, which can leave the top few
+    # results clustered in one small area. We keep the rank order but select
+    # a more separated subset: walk the ranked list and keep a candidate only
+    # if it is more than MIN_FINAL_SEPARATION_M from every already-selected
+    # one. The skipped candidates stay visible under ``nearby_alternatives``
+    # rather than being dropped.
+    # =====================================================
+    with timed_stage("Spatial diversification"):
+        top_n = max(1, int(max_candidates))
+        selected, nearby_alternatives, remaining, diversified_skipped = (
+            diversify_top_n(
+                candidates,
+                top_n=top_n,
+            )
+        )
+
+    # =====================================================
+    # STEP 12.7
+    # Site justification ("the proof") for EVERY candidate in the final
+    # top-N.
+    #
+    # A structured, audit-friendly object explaining why each candidate
+    # received its final score. Every candidate (rank i) is compared
+    # factor-by-factor against the NEXT-ranked candidate (rank i+1), showing
+    # the full chain of proofs: why #1 beats #2, why #2 beats #3, etc. The
+    # last-ranked candidate in the returned set has no "next" and its
+    # comparison field is left null. No natural-language paragraph is
+    # generated here: every number traces back to a real calculation.
+    # =====================================================
+
+    def _confidence_for(data_result, fallback="unavailable"):
+        """Map an analysis result's availability/confidence to a label."""
+        if not data_result or data_result.get("available") is not True:
+            return fallback
+        conf = data_result.get("confidence")
+        if conf in ("high", "medium", "low"):
+            return conf
+        return "high"
+
+    def _build_chain_margin(this_cf, next_cf):
+        """Per-factor weighted-contribution (v_ij) deltas between a candidate
+        (rank i) and the next-ranked candidate (rank i+1). These are the exact
+        values TOPSIS ranks on, so the margin shows why rank i beat rank i+1."""
+        next_by_factor = {f["factor"]: f for f in next_cf}
+        margins = []
+        for f in this_cf:
+            other = next_by_factor.get(f["factor"])
+            if (
+                other is None
+                or f.get("contribution") is None
+                or other.get("contribution") is None
+            ):
+                continue
+            delta = round(float(f["contribution"]) - float(other["contribution"]), 4)
+            if delta > 0:
+                favors = "this_candidate"
+            elif delta < 0:
+                favors = "next_rank"
+            else:
+                favors = "tie"
+            margins.append({
+                "factor": f["factor"],
+                "delta": delta,
+                "favors": favors,
+            })
+        return margins
+
+    for idx, cand in enumerate(selected):
+        mf = cand.get("multi_factor_score") or {}
+        consolidated = mf.get("consolidated_factors", [])
+
+        env = cand.get("environmental_constraints") or {}
+        hard_passed = env.get("hard_constraints") or []
+
+        # Every candidate except the last has a "next_rank" to compare
+        # against (rank i vs rank i+1). The last has none.
+        if idx + 1 < len(selected):
+            next_cand = selected[idx + 1]
+            next_cf = (
+                (next_cand.get("multi_factor_score") or {})
+                .get("consolidated_factors", [])
+            )
+            margin = _build_chain_margin(consolidated, next_cf) if next_cf else None
+        else:
+            margin = None
+
+        # Destructure helper for clarity.
+        b_metrics = cand.get("beneficiary_metrics") or {}
+
+        justification = {
+            "candidate_id": cand.get("candidate_id"),
+            "final_score": mf.get("final_score"),
+            "factor_breakdown": consolidated,
+            "hard_constraints_passed": hard_passed,
+            "margin_vs_next_rank": margin,
+            "exclusion_clearance": cand.get("exclusion_clearance") or [],
+            "catchment_landcover": cand.get("catchment_landcover") or {},
+            "downstream_conflict": cand.get("downstream_conflict") or {},
+            "beneficiary": {
+                "nearest_settlement_distance_m": (
+                    b_metrics.get("nearest_settlement_distance_m")
+                ),
+                "buildings_within_1km": b_metrics.get("buildings_within_1km"),
+                "beneficiary_score": b_metrics.get("beneficiary_score"),
+                "basis": b_metrics.get("basis"),
+            },
+            "data_confidence": {
+                "soil": _confidence_for(cand.get("soil_analysis")),
+                "rainfall": _confidence_for(
+                    cand.get("climate_analysis") or climate_analysis
+                ),
+                "land_use": _confidence_for(cand.get("land_use_analysis")),
+            },
+            "topsis": {
+                "distance_to_ideal_best": mf.get("S_plus"),
+                "distance_to_ideal_worst": mf.get("S_minus"),
+                "closeness_coefficient": mf.get("C_i"),
+            },
+        }
+        cand["site_justification"] = justification
+
+    # =====================================================
+    # STEP 12.8
+    # Top-level summary (from the recommended candidate) and overall
+    # data-confidence assessment.
+    # =====================================================
+
+    if selected:
+        soil_analysis = selected[0].get("soil_analysis")
+        land_use_analysis = selected[0].get("land_use_analysis")
+    else:
+        soil_analysis = None
+        land_use_analysis = None
+
+    data_confidence = assess_confidence(
+        dem_available=True,
+        hydrology_available=True,
+        rainfall_available=bool(climate_analysis.get("available")),
+        soil_available=bool((soil_analysis or {}).get("available")),
+        land_use_available=bool((land_use_analysis or {}).get("available")),
+        osm_available=bool(land_filter.osm_data_available),
+        storage_available=any(
+            (c.get("storage_estimation") or {}).get("available")
+            for c in selected
+        ),
+    )
 
     # =====================================================
     # STEP 13
@@ -1183,14 +1690,30 @@ def analyze_contour_file(
         # Candidates
         # -------------------------------------------------
 
+        # The full TOPSIS-ranked list (all survivors).
         "candidates":
             candidates,
 
+        # The spatially-diversified final top-N (what is actually
+        # recommended to the frontend).
+        "selected_candidates":
+            selected,
+
+        # High-ranked candidates set aside because they sit within the
+        # separation radius of a selected candidate - kept visible rather
+        # than silently dropped.
+        "nearby_alternatives":
+            nearby_alternatives,
+
+        # Count of candidates skipped by the diversification pass.
+        "diversified_skipped":
+            diversified_skipped,
+
         "recommended_candidate_id":
             (
-                candidates[0]["candidate_id"]
-                if candidates
-                else 1
+                selected[0]["candidate_id"]
+                if selected
+                else (candidates[0]["candidate_id"] if candidates else 1)
             ),
 
         "recommended_catchment_geojson":

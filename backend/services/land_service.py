@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import hashlib
 import json
+import os
+import time
 
 import httpx
 import numpy as np
@@ -11,10 +13,12 @@ from rasterio.features import geometry_mask
 from shapely.geometry import (
     GeometryCollection,
     LineString,
+    Point,
     Polygon,
     mapping,
 )
 from shapely.ops import (
+    nearest_points,
     polygonize,
     transform as shapely_transform,
     unary_union,
@@ -32,12 +36,107 @@ CACHE_DIR = (
 )
 
 
-# We keep two servers so that if one Overpass server
-# is temporarily unavailable, we can try another one.
-OVERPASS_ENDPOINTS = (
+# ---------------------------------------------------------
+# Overpass endpoints + request reliability configuration
+#
+# Overridable by environment variables so the same code works
+# locally with no configuration and on a stateless host such as
+# Render, where the filesystem cache starts empty and every
+# analysis begins cold. Generous timeouts plus bounded retries
+# across several endpoints are the primary defence; the disk
+# cache is only a best-effort secondary.
+# ---------------------------------------------------------
+
+# Primary endpoint first, then fallbacks. Kept as a module constant
+# so the default behaviour is unchanged when no env vars are set.
+DEFAULT_OVERPASS_URLS = (
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
 )
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+# Server-side Overpass QL execution timeout, seconds ([timeout:N]).
+OVERPASS_QUERY_TIMEOUT_S = max(1, _env_int("OVERPASS_TIMEOUT", 60))
+
+# Per-phase HTTP timeouts (seconds). The read timeout MUST exceed the
+# Overpass query timeout so a slow-but-working server is not aborted
+# before it answers.
+OVERPASS_CONNECT_TIMEOUT_S = max(1.0, _env_float("OVERPASS_CONNECT_TIMEOUT", 10.0))
+OVERPASS_READ_TIMEOUT_S = max(1.0, _env_float("OVERPASS_READ_TIMEOUT", 90.0))
+
+# Total attempts (first try + retries). Bounded so retries are never
+# infinite.
+OVERPASS_MAX_ATTEMPTS = max(1, _env_int("OVERPASS_MAX_RETRIES", 3))
+
+# Exponential backoff base (seconds): base, 2*base, 4*base, ...
+OVERPASS_BACKOFF_BASE_S = max(0.0, _env_float("OVERPASS_BACKOFF_BASE", 2.0))
+
+
+def _overpass_endpoints() -> tuple[str, ...]:
+    """Resolve the Overpass endpoint list from the environment.
+
+    ``OVERPASS_URL`` overrides the primary endpoint; the remaining
+    ``DEFAULT_OVERPASS_URLS`` stay as fallbacks unless
+    ``OVERPASS_FALLBACK_URLS`` (comma-separated) replaces them.
+    Duplicates are removed while preserving order.
+    """
+    primary = os.getenv("OVERPASS_URL", "").strip()
+
+    raw_fallbacks = os.getenv("OVERPASS_FALLBACK_URLS")
+    if raw_fallbacks is None or not raw_fallbacks.strip():
+        fallbacks = list(DEFAULT_OVERPASS_URLS[1:])
+    else:
+        fallbacks = [u.strip() for u in raw_fallbacks.split(",") if u.strip()]
+
+    candidates = (
+        [primary] if primary else [DEFAULT_OVERPASS_URLS[0]]
+    ) + fallbacks
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for url in candidates:
+        if url and url not in seen:
+            seen.add(url)
+            ordered.append(url)
+    return tuple(ordered)
+
+
+def _is_retryable_overpass_error(exc: BaseException) -> bool:
+    """Return True only for transient failures worth retrying.
+
+    Timeouts, connection/transport errors, the Overpass "server busy"
+    status codes (429/500/502/503/504) and an unparseable body are
+    transient. A malformed-query HTTP 400 is not: retrying it would
+    only repeat the same failure.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (429, 500, 502, 503, 504)
+    if isinstance(exc, httpx.TransportError):  # covers every timeout type
+        return True
+    if isinstance(exc, json.JSONDecodeError):
+        return True
+    return False
 
 
 # ---------------------------------------------------------
@@ -125,6 +224,18 @@ class LandFilterResult:
 
     # Flags the safety state so consumers can fail safely.
     osm_data_available: bool = True
+
+    # Raw, un-buffered OSM road geometries (projected to metres) used by
+    # the accessibility analysis to measure true nearest-road distance per
+    # candidate. Kept separate from the buffered exclusion geometries so the
+    # hard-exclusion mask is never confused with the proximity metric.
+    road_geometries: list = field(default_factory=list)
+
+    # Raw, un-buffered geometries grouped by exclusion category, in projected
+    # metre coordinates. Used to measure exclusion-clearance distances (how
+    # far a candidate is from a mapped water body / waterway / road /
+    # building) without needing a second Overpass call.
+    raw_geometries_by_category: dict[str, list] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------
@@ -393,7 +504,7 @@ def _download_osm_elements(
     # -----------------------------------------------------
 
     query = f"""
-[out:json][timeout:35];
+[out:json][timeout:{OVERPASS_QUERY_TIMEOUT_S}];
 (
   way["natural"="water"]({bbox});
   relation["natural"="water"]({bbox});
@@ -419,23 +530,44 @@ def _download_osm_elements(
 out geom;
 """
 
+    endpoints = _overpass_endpoints()
+
+    # Per-phase timeouts. httpx applies each phase independently; the read
+    # timeout is the one that governs how long we wait for an Overpass
+    # response, so it is deliberately larger than the server-side query
+    # timeout to leave room for queueing and transfer.
+    client_timeout = httpx.Timeout(
+        connect=OVERPASS_CONNECT_TIMEOUT_S,
+        read=OVERPASS_READ_TIMEOUT_S,
+        write=OVERPASS_READ_TIMEOUT_S,
+        pool=OVERPASS_CONNECT_TIMEOUT_S,
+    )
+
     last_error: Exception | None = None
+    attempt_errors: list[str] = []
 
     # -----------------------------------------------------
-    # Try Overpass servers
+    # Try the endpoints, retrying transient failures with
+    # exponential backoff.
+    #
+    # Endpoints are alternated across attempts so a single
+    # slow/overloaded server cannot consume the whole budget.
+    # Retries are bounded (OVERPASS_MAX_ATTEMPTS) - never infinite.
     # -----------------------------------------------------
 
-    for endpoint in OVERPASS_ENDPOINTS:
+    with httpx.Client(
+        timeout=client_timeout,
+        headers={
+            "User-Agent":
+            "VillagePondPlanningStudentProject/1.0"
+        },
+    ) as client:
 
-        try:
+        for attempt in range(OVERPASS_MAX_ATTEMPTS):
 
-            with httpx.Client(
-                timeout=45.0,
-                headers={
-                    "User-Agent":
-                    "VillagePondPlanningStudentProject/1.0"
-                },
-            ) as client:
+            endpoint = endpoints[attempt % len(endpoints)]
+
+            try:
 
                 response = client.post(
                     endpoint,
@@ -447,6 +579,29 @@ out geom;
                 response.raise_for_status()
 
                 payload = response.json()
+
+            except Exception as exc:
+
+                last_error = exc
+
+                attempt_errors.append(
+                    f"{endpoint}: {exc}"
+                )
+
+                # Do not retry a failure that cannot succeed on retry
+                # (e.g. a malformed-query HTTP 400).
+                if not _is_retryable_overpass_error(exc):
+                    break
+
+                if attempt == OVERPASS_MAX_ATTEMPTS - 1:
+                    break
+
+                time.sleep(
+                    OVERPASS_BACKOFF_BASE_S
+                    * (2 ** attempt)
+                )
+
+                continue
 
             # Save successful result
             try:
@@ -466,10 +621,6 @@ out geom;
                 ),
                 endpoint,
             )
-
-        except Exception as exc:
-
-            last_error = exc
 
     # -----------------------------------------------------
     # If internet/API fails, use cache
@@ -509,7 +660,13 @@ out geom;
         "failed and no cached land data exists. "
         "Connect to the Internet once and run "
         "the analysis again. "
-        f"Last error: {last_error}"
+        f"Attempts: {len(attempt_errors)}"
+        + (
+            f" ({'; '.join(attempt_errors)})"
+            if attempt_errors
+            else ""
+        )
+        + f". Last error: {last_error}"
     )
 
 
@@ -697,6 +854,8 @@ def build_osm_free_land_mask(
 
     buffered_geometries = []
     buffered_by_category = {k: [] for k in ("water", "waterway", "road", "building")}
+    road_geometries = []
+    raw_geometries_by_category = {k: [] for k in ("water", "waterway", "road", "building")}
 
     # ---------------------------------------------------------
     # Convert every OSM object into an exclusion polygon
@@ -766,6 +925,25 @@ def build_osm_free_land_mask(
             or buffered.is_empty
         ):
             continue
+
+        # -------------------------------------------------
+        # Keep the raw (un-buffered) geometry in projected
+        # metre coordinates for the accessibility and exclusion-clearance
+        # analyses so we can measure true per-candidate distances.
+        # -------------------------------------------------
+
+        projected_raw = shapely_transform(
+            terrain.to_projected.transform,
+            geometry,
+        )
+        if not projected_raw.is_empty:
+            raw_clip = projected_raw.intersection(
+                terrain.boundary_projected
+            )
+            if not raw_clip.is_empty:
+                raw_geometries_by_category[category].append(raw_clip)
+                if category == "road":
+                    road_geometries.append(raw_clip)
 
         # -------------------------------------------------
         # Only keep the part that intersects our
@@ -960,4 +1138,119 @@ def build_osm_free_land_mask(
         excluded_building_cells=
             excluded_building_cells,
 
+        road_geometries=
+            road_geometries,
+
+        raw_geometries_by_category=
+            raw_geometries_by_category,
+
     )
+
+
+# ---------------------------------------------------------
+# Exclusion-clearance measurement (proof that a candidate is not
+# creeping up to the edge of a forbidden feature)
+# ---------------------------------------------------------
+
+def required_buffer_for(
+    category: str,
+    tags: dict,
+    pond_radius_m: float,
+    safety_buffer_m: float = 10.0,
+    buffer_config: BufferConfig | None = None,
+) -> float:
+    """
+    Return the exact exclusion buffer (metres) that was applied around a
+    given OSM feature category during the hard-exclusion stage.
+
+    This mirrors the formulas in ``_project_and_buffer`` so the clearance
+    "required_buffer_m" always matches the buffer that was actually used for
+    exclusion — never a separately hardcoded number.
+    """
+    if buffer_config is None:
+        buffer_config = DEFAULT_BUFFER_CONFIG
+
+    if category == "water":
+        return pond_radius_m + max(safety_buffer_m, buffer_config.water_m)
+    if category == "building":
+        return pond_radius_m + max(5.0, safety_buffer_m, buffer_config.building_m)
+    if category == "road":
+        return pond_radius_m + max(6.0, safety_buffer_m, buffer_config.road_m)
+    if category == "waterway":
+        waterway_type = tags.get("waterway")
+        half_width = buffer_config.resolved_waterway_half_width(waterway_type)
+        return (
+            pond_radius_m
+            + max(safety_buffer_m, buffer_config.waterway_m)
+            + half_width
+        )
+    # Defensive: any other category uses a simple safety margin.
+    return pond_radius_m + safety_buffer_m
+
+
+def compute_exclusion_clearance(
+    candidate_point: Point,
+    raw_geometries_by_category: dict[str, list],
+    pond_radius_m: float,
+    safety_buffer_m: float = 10.0,
+    buffer_config: BufferConfig | None = None,
+    max_search_distance_m: float = 10_000.0,
+) -> list[dict]:
+    """
+    Measure, for a single candidate, the distance to the nearest mapped
+    feature in every exclusion category (water, waterway, road, building),
+    using the raw geometries already fetched for the exclusion mask.
+
+    Reuses the same buffer values from ``required_buffer_for`` so the
+    reported ``required_buffer_m`` is exactly what the hard-exclusion stage
+    applied, and the margin is the true distance leftover.
+
+    Returns a list of
+        {feature_type, nearest_distance_m, required_buffer_m, margin_m}
+    per category. When a category has no features within ``max_search_distance_m``,
+    ``nearest_distance_m`` is None and a note explains why (never a fabricated
+    large number).
+    """
+    clearance: list[dict] = []
+    for category in ("water", "waterway", "road", "building"):
+        geometries = raw_geometries_by_category.get(category) or []
+        required = required_buffer_for(
+            category,
+            {"waterway": "river"},
+            pond_radius_m,
+            safety_buffer_m,
+            buffer_config,
+        )
+
+        nearest_distance: float | None = None
+        for geometry in geometries:
+            if geometry is None or geometry.is_empty:
+                continue
+            try:
+                p, gp = nearest_points(candidate_point, geometry)
+                d = p.distance(gp)
+            except Exception:
+                continue
+            if nearest_distance is None or d < nearest_distance:
+                nearest_distance = d
+
+        entry = {
+            "feature_type": category,
+            "nearest_distance_m": (
+                round(nearest_distance, 1) if nearest_distance is not None else None
+            ),
+            "required_buffer_m": round(required, 1),
+            "margin_m": (
+                round(nearest_distance - required, 1)
+                if nearest_distance is not None
+                else None
+            ),
+        }
+        if nearest_distance is None:
+            entry["note"] = (
+                f"No mapped {category} feature found within "
+                f"{max_search_distance_m:.0f} m of the candidate."
+            )
+        clearance.append(entry)
+
+    return clearance
